@@ -5,9 +5,11 @@
  * - Fazer e receber chamadas
  * - Streaming de áudio bidirecional via WebSocket
  * - Gerenciar eventos de chamada
+ * 
+ * NOTA: Esta implementação usa a API REST do Telnyx diretamente
+ * para melhor controle e compatibilidade de tipos.
  */
 
-import Telnyx from 'telnyx';
 import WebSocket from 'ws';
 import { EventEmitter } from 'events';
 import {
@@ -17,10 +19,19 @@ import {
 } from '../types';
 import { Logger } from '../utils/Logger';
 
+// Interface para resposta da API Telnyx
+interface TelnyxCallResponse {
+  data: {
+    call_control_id: string;
+    call_leg_id: string;
+    call_session_id: string;
+  };
+}
+
 export class TelnyxProvider extends EventEmitter implements ITelephonyProvider {
-  private client: Telnyx;
   private config: TelnyxConfig;
   private logger: Logger;
+  private baseUrl = 'https://api.telnyx.com/v2';
   
   // WebSocket connections por call
   private audioStreams: Map<string, WebSocket> = new Map();
@@ -35,7 +46,31 @@ export class TelnyxProvider extends EventEmitter implements ITelephonyProvider {
     super();
     this.config = config;
     this.logger = new Logger('Telnyx');
-    this.client = new Telnyx(config.apiKey);
+  }
+
+  /**
+   * Faz requisição para API Telnyx
+   */
+  private async apiRequest<T>(
+    method: string,
+    endpoint: string,
+    body?: Record<string, unknown>
+  ): Promise<T> {
+    const response = await fetch(`${this.baseUrl}${endpoint}`, {
+      method,
+      headers: {
+        'Authorization': `Bearer ${this.config.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`Telnyx API error: ${response.status} - ${error}`);
+    }
+
+    return response.json() as Promise<T>;
   }
 
   /**
@@ -45,18 +80,18 @@ export class TelnyxProvider extends EventEmitter implements ITelephonyProvider {
     this.logger.info(`📞 Iniciando chamada para ${phoneNumber}`);
 
     try {
-      const call = await this.client.calls.create({
+      const response = await this.apiRequest<TelnyxCallResponse>('POST', '/calls', {
         connection_id: this.config.connectionId,
         to: phoneNumber,
         from: this.config.phoneNumber,
         webhook_url: this.config.webhookUrl,
         webhook_url_method: 'POST',
         // Configurações para voice AI
-        answering_machine_detection: 'detect_words', // Detectar caixa postal
+        answering_machine_detection: 'detect_words',
         client_state: Buffer.from(JSON.stringify({ type: 'outbound_prospecting' })).toString('base64'),
       });
 
-      const callControlId = call.data.call_control_id;
+      const callControlId = response.data.call_control_id;
       this.logger.info(`✅ Chamada iniciada: ${callControlId}`);
 
       return callControlId;
@@ -73,7 +108,7 @@ export class TelnyxProvider extends EventEmitter implements ITelephonyProvider {
     this.logger.info(`📴 Encerrando chamada ${callId}`);
 
     try {
-      await this.client.calls.hangup(callId);
+      await this.apiRequest('POST', `/calls/${callId}/actions/hangup`, {});
       
       // Fechar WebSocket se existir
       const ws = this.audioStreams.get(callId);
@@ -111,12 +146,11 @@ export class TelnyxProvider extends EventEmitter implements ITelephonyProvider {
    */
   private async playAudioViaApi(callId: string, audioBuffer: Buffer): Promise<void> {
     try {
-      // Converter para base64 e enviar como audio URL ou inline
+      // Converter para base64 e enviar como audio URL
       const base64Audio = audioBuffer.toString('base64');
       
-      await this.client.calls.playback_start(callId, {
+      await this.apiRequest('POST', `/calls/${callId}/actions/playback_start`, {
         audio_url: `data:audio/raw;base64,${base64Audio}`,
-        // Ou usar media_name se tiver áudio pré-carregado
       });
       
       this.logger.debug(`🔊 Áudio enviado via API: ${audioBuffer.length} bytes`);
@@ -134,13 +168,13 @@ export class TelnyxProvider extends EventEmitter implements ITelephonyProvider {
 
     try {
       // Solicitar streaming via Telnyx Call Control
-      const streamResponse = await this.client.calls.streaming_start(callId, {
+      await this.apiRequest('POST', `/calls/${callId}/actions/streaming_start`, {
         stream_url: `wss://seu-servidor.com/audio/${callId}`, // Seu WebSocket server
-        stream_track: 'both_tracks', // Receber e enviar
+        stream_track: 'both_tracks',
         enable_dialogflow: false,
       });
 
-      this.logger.info(`✅ Stream iniciado: ${streamResponse.data}`);
+      this.logger.info(`✅ Stream iniciado para ${callId}`);
     } catch (error) {
       this.logger.error('Erro ao iniciar stream:', error);
       throw error;
@@ -310,7 +344,7 @@ export class TelnyxProvider extends EventEmitter implements ITelephonyProvider {
    * Atende uma chamada inbound
    */
   async answerCall(callId: string): Promise<void> {
-    await this.client.calls.answer(callId);
+    await this.apiRequest('POST', `/calls/${callId}/actions/answer`, {});
     this.logger.info(`✅ Chamada ${callId} atendida`);
   }
 
@@ -318,7 +352,7 @@ export class TelnyxProvider extends EventEmitter implements ITelephonyProvider {
    * Transfere chamada para outro número
    */
   async transferCall(callId: string, toNumber: string): Promise<void> {
-    await this.client.calls.transfer(callId, {
+    await this.apiRequest('POST', `/calls/${callId}/actions/transfer`, {
       to: toNumber,
     });
     this.logger.info(`↗️ Chamada ${callId} transferida para ${toNumber}`);
@@ -328,7 +362,7 @@ export class TelnyxProvider extends EventEmitter implements ITelephonyProvider {
    * Coloca chamada em espera
    */
   async holdCall(callId: string, audioUrl?: string): Promise<void> {
-    await this.client.calls.hold(callId, {
+    await this.apiRequest('POST', `/calls/${callId}/actions/hold`, {
       audio_url: audioUrl,
     });
     this.logger.info(`⏸️ Chamada ${callId} em espera`);
@@ -338,7 +372,7 @@ export class TelnyxProvider extends EventEmitter implements ITelephonyProvider {
    * Retoma chamada da espera
    */
   async unholdCall(callId: string): Promise<void> {
-    await this.client.calls.unhold(callId);
+    await this.apiRequest('POST', `/calls/${callId}/actions/unhold`, {});
     this.logger.info(`▶️ Chamada ${callId} retomada`);
   }
 }

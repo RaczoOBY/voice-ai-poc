@@ -133,7 +133,7 @@ export class ElevenLabsTTS implements ITTS {
     
     return response.voices.map((voice) => ({
       id: voice.voice_id,
-      name: voice.name,
+      name: voice.name || 'Unknown',
       labels: voice.labels || {},
     }));
   }
@@ -146,7 +146,7 @@ export class ElevenLabsTTS implements ITTS {
     
     return {
       id: voice.voice_id,
-      name: voice.name,
+      name: voice.name || 'Unknown',
       samples: voice.samples?.length || 0,
     };
   }

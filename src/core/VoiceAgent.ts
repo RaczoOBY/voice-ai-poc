@@ -10,6 +10,7 @@
 
 import { EventEmitter } from 'events';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
+import WebSocket from 'ws';
 import {
   VoiceAgentConfig,
   VoiceAgentEvents,
@@ -19,6 +20,7 @@ import {
   FillerContext,
   CallSummary,
   LatencyBreakdown,
+  TelnyxCallEvent,
 } from '../types';
 import { Logger } from '../utils/Logger';
 
@@ -39,13 +41,70 @@ export class VoiceAgent extends EventEmitter {
   async start(port: number): Promise<void> {
     const server = createServer(this.handleWebhook.bind(this));
     
+    // Criar WebSocket server para streaming de áudio
+    const wss = new WebSocket.Server({ server, path: '/audio' });
+    this.setupAudioWebSocket(wss);
+    
     server.listen(port, () => {
       this.logger.info(`🎧 Voice Agent listening on port ${port}`);
+      this.logger.info(`🔌 WebSocket server ready at ws://localhost:${port}/audio`);
     });
 
     // Configurar handlers de eventos de telefonia
     this.config.telephony.onCallEvent((event) => {
       this.handleTelephonyEvent(event);
+    });
+  }
+
+  /**
+   * Configura WebSocket server para receber áudio das chamadas
+   */
+  private setupAudioWebSocket(wss: WebSocket.Server): void {
+    wss.on('connection', (ws, req) => {
+      // Extrair callId da URL: /audio/call-id
+      const callId = req.url?.split('/').pop();
+      if (!callId || !this.activeCalls.has(callId)) {
+        this.logger.warn(`WebSocket: callId inválido ou sessão não encontrada: ${callId}`);
+        ws.close();
+        return;
+      }
+
+      this.logger.info(`🔌 WebSocket conectado para chamada ${callId}`);
+
+      // Buffer para acumular chunks de áudio
+      let audioBuffer: Buffer[] = [];
+      let silenceTimeout: NodeJS.Timeout | null = null;
+      const SILENCE_THRESHOLD_MS = 500; // 500ms de silêncio = fim do turno
+
+      ws.on('message', (data: Buffer) => {
+        // Acumular áudio
+        audioBuffer.push(data);
+
+        // Reset do timeout de silêncio
+        if (silenceTimeout) clearTimeout(silenceTimeout);
+        
+        silenceTimeout = setTimeout(async () => {
+          // Silêncio detectado - processar turno
+          if (audioBuffer.length > 0) {
+            const fullAudio = Buffer.concat(audioBuffer);
+            audioBuffer = [];
+            
+            this.logger.debug(`🎤 Áudio recebido: ${fullAudio.length} bytes, processando turno...`);
+            
+            // Processar o turno de conversa
+            await this.processTurn(callId, fullAudio);
+          }
+        }, SILENCE_THRESHOLD_MS);
+      });
+
+      ws.on('close', () => {
+        this.logger.info(`🔌 WebSocket desconectado para chamada ${callId}`);
+        if (silenceTimeout) clearTimeout(silenceTimeout);
+      });
+
+      ws.on('error', (error) => {
+        this.logger.error(`Erro WebSocket para chamada ${callId}:`, error);
+      });
     });
   }
 
@@ -380,7 +439,7 @@ export class VoiceAgent extends EventEmitter {
   /**
    * Encerra uma chamada
    */
-  async endCall(callId: string, outcome: CallSummary['outcome'] = 'ended' as any): Promise<CallSummary> {
+  async endCall(callId: string, outcome: CallSummary['outcome'] = 'not_interested'): Promise<CallSummary> {
     const session = this.activeCalls.get(callId);
     if (!session) {
       throw new Error(`Sessão não encontrada: ${callId}`);
@@ -443,10 +502,131 @@ export class VoiceAgent extends EventEmitter {
   /**
    * Handler para eventos de telefonia
    */
-  private handleTelephonyEvent(event: any): void {
-    this.logger.debug(`📡 Evento Telnyx: ${event.type || event.event_type}`);
+  private handleTelephonyEvent(event: TelnyxCallEvent): void {
+    const eventType = event.type;
+    const callId = event.payload.call_control_id;
     
-    // Implementar handlers específicos baseado no tipo de evento
-    // call.answered, call.hangup, etc.
+    this.logger.debug(`📡 Evento Telnyx: ${eventType} para chamada ${callId}`);
+    
+    switch (eventType) {
+      case 'call.initiated':
+        this.logger.info(`📞 Chamada iniciada: ${callId}`);
+        break;
+
+      case 'call.answered':
+        this.handleCallAnswered(callId);
+        break;
+
+      case 'call.hangup':
+        this.handleCallHangup(callId);
+        break;
+
+      case 'call.machine.detection.ended':
+        // Detectou se é pessoa ou caixa postal
+        this.logger.info(`🤖 AMD: chamada ${callId}`);
+        break;
+
+      default:
+        this.logger.debug(`Evento não tratado: ${eventType}`);
+    }
+  }
+
+  /**
+   * Trata quando a chamada é atendida
+   */
+  private async handleCallAnswered(callId: string): Promise<void> {
+    const session = this.activeCalls.get(callId);
+    if (!session) {
+      this.logger.warn(`Sessão não encontrada para chamada atendida: ${callId}`);
+      return;
+    }
+
+    session.status = 'connected';
+    this.logger.info(`✅ Chamada ${callId} atendida`);
+
+    // Configurar callback para receber áudio desta chamada
+    this.config.telephony.onAudioReceived(callId, async (audio: Buffer) => {
+      await this.processTurn(callId, audio);
+    });
+
+    // Pré-carregar fillers personalizados se temos o nome
+    if (session.prospectName) {
+      await this.config.fillerManager.preloadFillersForName?.(session.prospectName);
+    }
+
+    // Gerar saudação inicial
+    await this.generateGreeting(callId);
+  }
+
+  /**
+   * Gera a saudação inicial da chamada
+   */
+  private async generateGreeting(callId: string): Promise<void> {
+    const session = this.activeCalls.get(callId);
+    if (!session) return;
+
+    this.logger.info(`🎤 Gerando saudação inicial para ${callId}`);
+
+    try {
+      // Gerar mensagem de abertura com o LLM
+      const messages = this.buildLLMMessages(session);
+      const response = await this.config.llm.generate(messages, {
+        maxTokens: 100,
+        temperature: 0.7,
+      });
+
+      // Adicionar ao histórico
+      session.conversationHistory.push({
+        role: 'agent',
+        content: response.text,
+        timestamp: new Date(),
+      });
+
+      // Sintetizar e enviar áudio
+      const ttsResult = await this.config.tts.synthesize(response.text);
+      await this.config.telephony.sendAudio(callId, ttsResult.audioBuffer);
+
+      this.logger.info(`✅ Saudação enviada: "${response.text.substring(0, 50)}..."`);
+    } catch (error) {
+      this.logger.error(`Erro ao gerar saudação para ${callId}:`, error);
+    }
+  }
+
+  /**
+   * Trata quando a chamada é encerrada
+   */
+  private async handleCallHangup(callId: string): Promise<void> {
+    const session = this.activeCalls.get(callId);
+    if (!session) {
+      this.logger.warn(`Sessão não encontrada para hangup: ${callId}`);
+      return;
+    }
+
+    this.logger.info(`📴 Chamada ${callId} encerrada pelo outro lado`);
+    
+    // Finalizar a sessão
+    try {
+      await this.endCall(callId, 'not_interested');
+    } catch (error) {
+      this.logger.error(`Erro ao finalizar chamada ${callId}:`, error);
+      // Limpar mesmo assim
+      this.activeCalls.delete(callId);
+    }
+  }
+
+  /**
+   * Retorna estatísticas das chamadas ativas
+   */
+  getActiveCallsStats(): { count: number; calls: Array<{ id: string; duration: number; turns: number }> } {
+    const calls = Array.from(this.activeCalls.values()).map((session) => ({
+      id: session.id,
+      duration: Date.now() - session.startedAt.getTime(),
+      turns: session.conversationHistory.length,
+    }));
+
+    return {
+      count: calls.length,
+      calls,
+    };
   }
 }

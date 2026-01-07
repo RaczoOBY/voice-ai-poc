@@ -246,6 +246,7 @@ export interface IFillerManager {
   preloadFillers(): Promise<void>;
   getFiller(context: FillerContext): FillerAudio | null;
   getFillerForName(name: string): FillerAudio | null;
+  preloadFillersForName?(name: string): Promise<void>;
 }
 
 export interface IMetricsCollector {

@@ -7,6 +7,8 @@
  */
 
 import OpenAI from 'openai';
+import WebSocket from 'ws';
+import { EventEmitter } from 'events';
 import {
   ILLM,
   OpenAIConfig,
@@ -118,14 +120,17 @@ export class OpenAILLM implements ILLM {
 /**
  * OpenAI Realtime LLM - Para voice-to-voice nativo
  * Usa a API Realtime para menor latência possível
+ * 
+ * NOTA: Esta classe é experimental e requer a API Realtime da OpenAI.
+ * Para uso em produção, considere usar o OpenAILLM padrão.
  */
-export class OpenAIRealtimeLLM implements ILLM {
+export class OpenAIRealtimeLLM extends EventEmitter implements ILLM {
   private config: OpenAIConfig;
   private logger: Logger;
   private ws: WebSocket | null = null;
-  private responseCallbacks: Map<string, (text: string) => void> = new Map();
 
   constructor(config: OpenAIConfig) {
+    super();
     this.config = config;
     this.logger = new Logger('OpenAI-Realtime-LLM');
   }
@@ -181,12 +186,12 @@ export class OpenAIRealtimeLLM implements ILLM {
         resolve();
       });
 
-      this.ws!.on('error', (error) => {
+      this.ws!.on('error', (error: Error) => {
         this.logger.error('Erro WebSocket:', error);
         reject(error);
       });
 
-      this.ws!.on('message', (data: Buffer) => {
+      this.ws!.on('message', (data: WebSocket.RawData) => {
         this.handleRealtimeEvent(JSON.parse(data.toString()));
       });
     });
@@ -210,7 +215,7 @@ export class OpenAIRealtimeLLM implements ILLM {
   /**
    * Processa eventos da API Realtime
    */
-  private handleRealtimeEvent(event: any): void {
+  private handleRealtimeEvent(event: Record<string, unknown>): void {
     switch (event.type) {
       case 'session.created':
         this.logger.info('Sessão criada');
@@ -222,7 +227,7 @@ export class OpenAIRealtimeLLM implements ILLM {
 
       case 'response.audio.delta':
         // Áudio de resposta (streaming)
-        this.emit('audio', Buffer.from(event.delta, 'base64'));
+        super.emit('audio', Buffer.from(event.delta as string, 'base64'));
         break;
 
       case 'response.audio_transcript.delta':
@@ -252,7 +257,7 @@ export class OpenAIRealtimeLLM implements ILLM {
    * Registra callback para áudio de resposta
    */
   onAudio(callback: (audio: Buffer) => void): void {
-    // Implementar event emitter
+    this.on('audio', callback);
   }
 
   /**
@@ -263,9 +268,5 @@ export class OpenAIRealtimeLLM implements ILLM {
       this.ws.close();
       this.ws = null;
     }
-  }
-
-  private emit(event: string, data: any): void {
-    // Simplificado - usar EventEmitter em produção
   }
 }

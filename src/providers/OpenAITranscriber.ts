@@ -8,6 +8,7 @@
 
 import OpenAI from 'openai';
 import { Readable } from 'stream';
+import WebSocket from 'ws';
 import {
   ITranscriber,
   OpenAIConfig,
@@ -122,6 +123,9 @@ export class OpenAITranscriber implements ITranscriber {
 /**
  * OpenAI Realtime Transcriber - Para streaming em tempo real
  * Usa a nova API Realtime da OpenAI
+ * 
+ * NOTA: Esta classe é experimental e requer a API Realtime da OpenAI.
+ * Para uso em produção, considere usar o OpenAITranscriber padrão.
  */
 export class OpenAIRealtimeTranscriber implements ITranscriber {
   private config: OpenAIConfig;
@@ -177,7 +181,7 @@ export class OpenAIRealtimeTranscriber implements ITranscriber {
       }));
     });
 
-    this.ws.on('message', (data: Buffer) => {
+    this.ws.on('message', (data: WebSocket.RawData) => {
       try {
         const event = JSON.parse(data.toString());
         this.handleRealtimeEvent(callId, event);
@@ -186,7 +190,7 @@ export class OpenAIRealtimeTranscriber implements ITranscriber {
       }
     });
 
-    this.ws.on('error', (error) => {
+    this.ws.on('error', (error: Error) => {
       this.logger.error('Erro WebSocket:', error);
     });
 
@@ -215,13 +219,13 @@ export class OpenAIRealtimeTranscriber implements ITranscriber {
   /**
    * Processa eventos da API Realtime
    */
-  private handleRealtimeEvent(callId: string, event: any): void {
+  private handleRealtimeEvent(callId: string, event: Record<string, unknown>): void {
     switch (event.type) {
       case 'conversation.item.input_audio_transcription.completed':
         const callback = this.transcriptCallbacks.get(callId);
         if (callback) {
           callback({
-            text: event.transcript,
+            text: event.transcript as string,
             duration: 0,
           });
         }
