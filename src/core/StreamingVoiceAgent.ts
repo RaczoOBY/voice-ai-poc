@@ -64,11 +64,25 @@ export class StreamingVoiceAgent extends EventEmitter {
   private currentMetrics: StreamingMetrics | null = null;
   private isProcessing: boolean = false;
   private isGreetingInProgress: boolean = false; // Bloqueia processamento durante saudação
+  private useStreamingSTT: boolean = false; // Usa STT em streaming (Scribe)
 
   constructor(config: StreamingVoiceAgentConfig) {
     super();
     this.config = config;
     this.logger = new Logger('StreamingAgent');
+    
+    // Detectar se o transcriber suporta streaming
+    this.useStreamingSTT = !!(
+      this.config.transcriber.startStream &&
+      this.config.transcriber.feedAudio &&
+      this.config.transcriber.onTranscript
+    );
+    
+    if (this.useStreamingSTT) {
+      this.logger.info('🚀 Modo STT: Streaming (ElevenLabs Scribe)');
+    } else {
+      this.logger.info('📦 Modo STT: Batch (OpenAI Whisper)');
+    }
   }
 
   /**
@@ -97,10 +111,43 @@ export class StreamingVoiceAgent extends EventEmitter {
 
     this.activeSessions.set(callId, session);
     
-    // Configurar callback de áudio
-    this.config.localProvider.onAudioReceived(callId, async (audio: Buffer) => {
-      await this.processStreamingTurn(callId, audio);
-    });
+    // Configurar modo de VAD baseado no tipo de STT
+    if (this.useStreamingSTT) {
+      // MODO STREAMING (Scribe): VAD externo, chunks enviados diretamente
+      this.config.localProvider.setVADMode('external');
+      
+      // Iniciar stream do transcriber
+      await this.config.transcriber.startStream!(callId);
+      
+      // Callback para chunks de áudio - envia diretamente para o Scribe
+      this.config.localProvider.onAudioChunk(callId, (chunk: Buffer) => {
+        if (!this.isGreetingInProgress) {
+          this.config.transcriber.feedAudio!(callId, chunk);
+        }
+      });
+      
+      // Callback para transcrições finais do Scribe
+      this.config.transcriber.onTranscript!(callId, async (result) => {
+        if (!this.isGreetingInProgress && !this.isProcessing) {
+          await this.processTranscription(callId, result);
+        }
+      });
+      
+      // Callback para transcrições parciais (opcional, para feedback)
+      if (this.config.transcriber.onPartialTranscript) {
+        this.config.transcriber.onPartialTranscript(callId, (text) => {
+          this.emit('partial:transcript', callId, text);
+        });
+      }
+    } else {
+      // MODO BATCH (Whisper): VAD interno, áudio acumulado
+      this.config.localProvider.setVADMode('internal');
+      
+      // Callback de áudio após VAD detectar fim da fala
+      this.config.localProvider.onAudioReceived(callId, async (audio: Buffer) => {
+        await this.processStreamingTurn(callId, audio);
+      });
+    }
 
     // Listener para barge-in
     this.config.localProvider.on('playback:interrupted', () => {
@@ -137,6 +184,48 @@ export class StreamingVoiceAgent extends EventEmitter {
     
     // Gerar saudação com streaming
     await this.streamLLMToTTS(callId, greetingPrompt, session);
+  }
+
+  /**
+   * Toca um filler GENÉRICO imediatamente (antes de saber o que o usuário disse)
+   * Usado em paralelo com STT para dar feedback instantâneo
+   */
+  private async playFillerGeneric(callId: string, session: CallSession): Promise<void> {
+    if (!this.config.fillerManager) {
+      return; // Fillers não configurados
+    }
+
+    try {
+      const conversationStage = this.detectConversationStage(session);
+      
+      // Usar filler genérico (não sabemos ainda o que o usuário disse)
+      const filler = this.config.fillerManager.getFiller({
+        conversationStage,
+        prospectName: session.prospectName,
+        // Sem lastUserMessage - força filler genérico
+      });
+
+      if (filler) {
+        this.logger.info(`🎵 Tocando filler: "${filler.text}"`);
+        await this.config.localProvider.sendAudio(callId, filler.audioBuffer);
+        session.metrics.fillersUsed++;
+      }
+    } catch (error) {
+      // Falha no filler não deve interromper o fluxo
+      this.logger.warn('Erro ao tocar filler:', error);
+    }
+  }
+
+  /**
+   * Detecta o estágio da conversa baseado no histórico
+   */
+  private detectConversationStage(session: CallSession): 'intro' | 'qualifying' | 'presenting' | 'closing' {
+    const turns = session.conversationHistory.length;
+    
+    if (turns <= 2) return 'intro';
+    if (turns <= 6) return 'qualifying';
+    if (turns <= 12) return 'presenting';
+    return 'closing';
   }
 
   /**
@@ -186,7 +275,13 @@ export class StreamingVoiceAgent extends EventEmitter {
 
     try {
       // ============================================
-      // FASE 1: Speech-to-Text
+      // FASE 0: Tocar filler IMEDIATAMENTE (em paralelo com STT)
+      // Isso dá feedback instantâneo ao usuário
+      // ============================================
+      const fillerPromise = this.playFillerGeneric(callId, session);
+
+      // ============================================
+      // FASE 1: Speech-to-Text (em paralelo com filler)
       // ============================================
       this.logger.info('📝 Transcrevendo...');
       
@@ -195,6 +290,9 @@ export class StreamingVoiceAgent extends EventEmitter {
       
       const sttDuration = this.currentMetrics.sttEnd - this.currentMetrics.sttStart;
       this.logger.info(`📝 STT (${sttDuration}ms): "${transcription.text}"`);
+
+      // Esperar filler terminar antes de continuar
+      await fillerPromise;
 
       // Validar transcrição
       if (!transcription.text || transcription.text.trim().length < 2) {
@@ -221,6 +319,92 @@ export class StreamingVoiceAgent extends EventEmitter {
       // ============================================
       // FASE 3: Calcular métricas
       // ============================================
+      this.currentMetrics.playbackEnd = Date.now();
+      this.recordTurnMetrics(session);
+
+    } catch (error) {
+      this.logger.error(`Erro no turno ${turnId}:`, error);
+      this.emit('error', error, `turn:${turnId}`);
+    } finally {
+      this.isProcessing = false;
+    }
+  }
+
+  /**
+   * Processa uma transcrição já pronta (modo streaming - Scribe)
+   * Pula a etapa de STT pois o Scribe já transcreveu via streaming
+   */
+  async processTranscription(callId: string, transcription: { text: string; language?: string; duration?: number }): Promise<void> {
+    const session = this.activeSessions.get(callId);
+    if (!session) {
+      this.logger.error(`Sessão não encontrada: ${callId}`);
+      return;
+    }
+
+    // Ignorar durante saudação
+    if (this.isGreetingInProgress) {
+      return;
+    }
+
+    // Ignorar enquanto agente fala
+    if (this.config.localProvider.isCurrentlyPlaying()) {
+      return;
+    }
+
+    if (this.isProcessing) {
+      this.logger.debug('Já processando, ignorando...');
+      return;
+    }
+
+    this.isProcessing = true;
+    const turnId = `turn-${Date.now()}`;
+
+    // Métricas - STT já aconteceu via streaming
+    this.currentMetrics = {
+      turnId,
+      sttStart: Date.now() - (transcription.duration || 0), // Estimar início
+      sttEnd: Date.now(),
+      llmStart: 0,
+      llmFirstToken: 0,
+      ttsStart: 0,
+      ttsFirstChunk: 0,
+      playbackStart: 0,
+      playbackEnd: 0,
+      totalTokens: 0,
+      interrupted: false,
+    };
+
+    const sttDuration = transcription.duration || 0;
+    this.logger.info(`📝 STT Scribe (${sttDuration}ms): "${transcription.text}"`);
+
+    try {
+      // Tocar filler enquanto LLM gera resposta
+      const fillerPromise = this.playFillerGeneric(callId, session);
+
+      // Validar transcrição
+      if (!transcription.text || transcription.text.trim().length < 2) {
+        this.logger.warn('Transcrição muito curta, ignorando turno');
+        this.isProcessing = false;
+        return;
+      }
+
+      // Adicionar ao histórico
+      session.conversationHistory.push({
+        role: 'user',
+        content: transcription.text,
+        timestamp: new Date(),
+      });
+
+      this.emit('user:spoke', callId, transcription.text);
+
+      // Esperar filler terminar
+      await fillerPromise;
+
+      // LLM → TTS → Play
+      const messages = this.buildLLMMessages(session);
+      await this.streamLLMToTTS(callId, messages, session);
+
+      // Métricas
       this.currentMetrics.playbackEnd = Date.now();
       this.recordTurnMetrics(session);
 

@@ -224,6 +224,7 @@ export interface ITranscriber {
   startStream?(callId: string): Promise<void>;
   feedAudio?(callId: string, chunk: Buffer): void;
   onTranscript?(callId: string, callback: (result: TranscriptionResult) => void): void;
+  onPartialTranscript?(callId: string, callback: (text: string) => void): void; // Transcrições parciais em tempo real
 }
 
 export interface ILLM {
@@ -240,6 +241,7 @@ export interface ILLM {
 export interface ITTS {
   synthesize(text: string): Promise<TTSResult>;
   synthesizeStream?(text: string, onChunk: (chunk: Buffer) => void): Promise<void>;
+  synthesizeFiller?(text: string): Promise<TTSResult>; // Para fillers com voice settings otimizados
 }
 
 export interface IFillerManager {

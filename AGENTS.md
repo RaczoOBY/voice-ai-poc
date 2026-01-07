@@ -8,8 +8,8 @@ POC de agente de voz para prospecção automatizada via telefone. O sistema rece
 
 | Componente | Provider | Função |
 |------------|----------|--------|
-| Telefonia | Telnyx | Chamadas VoIP, streaming de áudio |
-| STT | OpenAI Whisper | Transcrição de voz para texto |
+| Telefonia | Telnyx / Local | Chamadas VoIP ou microfone/speaker |
+| STT | ElevenLabs Scribe / OpenAI Whisper | Transcrição de voz (streaming ou batch) |
 | LLM | OpenAI GPT-4o | Geração de respostas |
 | TTS | ElevenLabs Flash | Síntese de voz em português BR |
 
@@ -23,25 +23,38 @@ Audio Usuario → STT → LLM → TTS → Audio Agente
            MetricsCollector (métricas)
 ```
 
+### Modo Streaming (ElevenLabs Scribe)
+```
+Mic → Chunks → Scribe (WebSocket) → partial_transcript
+                                  → committed_transcript → LLM → TTS → Speaker
+```
+
+### Modo Batch (OpenAI Whisper)
+```
+Mic → VAD (energia) → Audio completo → Whisper → LLM → TTS → Speaker
+```
+
 ## Arquivos Principais
 
 | Arquivo | Descrição |
 |---------|-----------|
-| `src/index.ts` | Entry point, inicializa providers e agente |
-| `src/core/VoiceAgent.ts` | Orquestrador principal do pipeline |
+| `src/index.ts` | Entry point modo Telnyx |
+| `src/scripts/local-test.ts` | Entry point modo local (microfone) |
+| `src/core/StreamingVoiceAgent.ts` | Orquestrador com suporte a streaming |
 | `src/core/FillerManager.ts` | Gerencia fillers pré-gerados |
-| `src/core/MetricsCollector.ts` | Coleta e analisa métricas de latência |
 | `src/config.ts` | Configurações centralizadas |
 | `src/types.ts` | Interfaces e tipos TypeScript |
 
 ## Providers (Modulares)
 
-| Provider | Interface | Pode trocar por |
-|----------|-----------|-----------------|
-| `OpenAITranscriber` | `ITranscriber` | Deepgram, AssemblyAI |
-| `OpenAILLM` | `ILLM` | Anthropic Claude, Groq |
-| `ElevenLabsTTS` | `ITTS` | Cartesia, PlayHT |
-| `TelnyxProvider` | `ITelephonyProvider` | Twilio, Vonage |
+| Provider | Interface | Descrição |
+|----------|-----------|-----------|
+| `ElevenLabsScribe` | `ITranscriber` | STT streaming via WebSocket (recomendado) |
+| `OpenAITranscriber` | `ITranscriber` | STT batch via Whisper API |
+| `OpenAILLM` | `ILLM` | GPT-4o para respostas |
+| `ElevenLabsTTS` | `ITTS` | Síntese de voz |
+| `LocalAudioProvider` | `ITelephonyProvider` | Microfone/speaker local |
+| `TelnyxProvider` | `ITelephonyProvider` | Telefonia VoIP |
 
 ## Para Rodar
 
@@ -63,26 +76,39 @@ npm run local
 npm run dev
 ```
 
-## Variáveis de Ambiente Necessárias
+## Variáveis de Ambiente
 
-- `TELNYX_API_KEY` - API key do Telnyx
-- `TELNYX_CONNECTION_ID` - ID da conexão SIP
-- `OPENAI_API_KEY` - API key da OpenAI
-- `ELEVENLABS_API_KEY` - API key do ElevenLabs
-- `WEBHOOK_URL` - URL pública para webhooks do Telnyx
+| Variável | Descrição |
+|----------|-----------|
+| `STT_PROVIDER` | `elevenlabs` (Scribe) ou `openai` (Whisper) |
+| `OPENAI_API_KEY` | API key da OpenAI (LLM) |
+| `ELEVENLABS_API_KEY` | API key do ElevenLabs (TTS + STT) |
+| `TELNYX_API_KEY` | API key do Telnyx (modo telefonia) |
+| `MODE` | `local` ou `telnyx` |
 
-## TODOs Conhecidos
+## Comparação STT
 
-- [ ] Pipeline de áudio não está totalmente integrado
-- [ ] Falta verificação de assinatura do webhook
-- [ ] Testes unitários não implementados
-- [ ] Circuit breaker para providers externos
+| Métrica | ElevenLabs Scribe | OpenAI Whisper |
+|---------|-------------------|----------------|
+| Latência | ~100-300ms | ~800-2000ms |
+| Modo | Streaming (WebSocket) | Batch (HTTP) |
+| Parciais | Sim | Não |
+| VAD | Integrado | Manual |
 
 ## Métricas de Latência (Target)
 
 | Etapa | Threshold | Descrição |
 |-------|-----------|-----------|
-| STT | < 500ms | Transcrição |
+| STT | < 300ms | Transcrição (Scribe) |
 | LLM | < 1000ms | Geração de resposta |
 | TTS | < 200ms | Síntese de voz |
 | Total | < 1500ms | Voice-to-voice |
+
+## TODOs
+
+- [x] ElevenLabs Scribe para STT streaming
+- [x] LocalAudioProvider com barge-in
+- [x] Sistema de fillers
+- [ ] Verificação de assinatura do webhook
+- [ ] Testes unitários
+- [ ] Circuit breaker para providers externos

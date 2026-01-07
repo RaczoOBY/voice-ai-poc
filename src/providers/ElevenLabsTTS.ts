@@ -92,6 +92,66 @@ export class ElevenLabsTTS implements ITTS {
   }
 
   /**
+   * Sintetiza FILLER com configurações otimizadas para sons curtos e naturais
+   * - Menor stability: Mais variação natural (menos robótico)
+   * - Menor similarity_boost: Som menos "perfeito"
+   * - Ideal para onomatopeias como "Uhum...", "Hmm...", "Tá..."
+   */
+  async synthesizeFiller(text: string): Promise<TTSResult> {
+    const startTime = Date.now();
+    this.logger.debug(`🎵 Sintetizando filler: "${text}"`);
+
+    try {
+      const response = await fetch(
+        `${ELEVENLABS_API_BASE}/text-to-speech/${this.config.voiceId}?output_format=pcm_22050`,
+        {
+          method: 'POST',
+          headers: {
+            'Accept': 'audio/pcm',
+            'Content-Type': 'application/json',
+            'xi-api-key': this.config.apiKey,
+          },
+          body: JSON.stringify({
+            text,
+            model_id: this.config.model,
+            voice_settings: {
+              // Configurações otimizadas para fillers naturais
+              stability: 0.3,           // Menor = mais variação natural
+              similarity_boost: 0.5,    // Menor = menos artificial/perfeito
+              style: 0.0,               // Neutro
+              use_speaker_boost: false, // Desligado para sons mais suaves
+            },
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(`ElevenLabs API error ${response.status}: ${errorBody}`);
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      const audioBuffer = Buffer.from(arrayBuffer);
+      const duration = Date.now() - startTime;
+
+      // PCM 22050Hz mono 16-bit = 44100 bytes/segundo
+      const audioDuration = audioBuffer.length / 44100;
+
+      const result: TTSResult = {
+        audioBuffer,
+        duration: audioDuration,
+        characterCount: text.length,
+      };
+
+      this.logger.info(`🎵 Filler (${duration}ms): "${text}" → ${audioBuffer.length} bytes (~${audioDuration.toFixed(1)}s)`);
+      return result;
+    } catch (error) {
+      this.logger.error('Erro no filler TTS:', error);
+      throw error;
+    }
+  }
+
+  /**
    * Sintetiza com streaming usando fetch direto
    * Retorna PCM 16-bit 16kHz mono para compatibilidade com speaker
    */

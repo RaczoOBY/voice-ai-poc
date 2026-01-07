@@ -15,10 +15,13 @@
 import { config, validateConfig } from '../config';
 import { LocalAudioProvider } from '../providers/LocalAudioProvider';
 import { OpenAITranscriber } from '../providers/OpenAITranscriber';
+import { ElevenLabsScribe } from '../providers/ElevenLabsScribe';
 import { OpenAILLM } from '../providers/OpenAILLM';
 import { ElevenLabsTTS } from '../providers/ElevenLabsTTS';
+import { FillerManager } from '../core/FillerManager';
 import { StreamingVoiceAgent } from '../core/StreamingVoiceAgent';
 import { Logger } from '../utils/Logger';
+import { ITranscriber } from '../types';
 
 const logger = new Logger('LocalTest');
 
@@ -92,22 +95,49 @@ async function main(): Promise<void> {
     logger.info('Inicializando providers...');
     
     const localProvider = new LocalAudioProvider();
-    const transcriber = new OpenAITranscriber(config.openai);
     const llm = new OpenAILLM(config.openai);
     const tts = new ElevenLabsTTS(config.elevenlabs);
+
+    // Escolher STT baseado na configuração
+    let transcriber: ITranscriber;
+    
+    if (config.stt.provider === 'elevenlabs') {
+      logger.info('🚀 Usando ElevenLabs Scribe (STT streaming)');
+      transcriber = new ElevenLabsScribe({
+        apiKey: config.elevenlabs.apiKey,
+        ...config.stt.elevenlabs,
+      });
+    } else {
+      logger.info('📦 Usando OpenAI Whisper (STT batch)');
+      transcriber = new OpenAITranscriber(config.openai);
+    }
 
     logger.info('✅ Providers inicializados');
 
     // Warmup do TTS
-    logger.info('🔥 Aquecendo conexão com ElevenLabs...');
+    logger.info('🔥 Aquecendo conexão com ElevenLabs TTS...');
     await tts.warmup();
     logger.info('✅ TTS aquecido');
+
+    // Warmup do STT se for Scribe
+    if (config.stt.provider === 'elevenlabs' && 'warmup' in transcriber) {
+      logger.info('🔥 Aquecendo conexão com ElevenLabs Scribe...');
+      await (transcriber as ElevenLabsScribe).warmup();
+      logger.info('✅ Scribe aquecido');
+    }
+
+    // Inicializar FillerManager e pré-carregar fillers
+    logger.info('🔄 Carregando fillers...');
+    const fillerManager = new FillerManager(tts);
+    await fillerManager.preloadFillers();
+    logger.info('✅ Fillers carregados');
 
     // Criar agente de streaming
     const agent = new StreamingVoiceAgent({
       transcriber,
       llm,
       tts,
+      fillerManager,
       systemPrompt: config.agent.systemPrompt,
       localProvider,
     });
@@ -119,6 +149,11 @@ async function main(): Promise<void> {
 
     agent.on('agent:spoke', (callId: string, text: string) => {
       printMessage('agent', text);
+    });
+
+    // Transcrições parciais (apenas Scribe)
+    agent.on('partial:transcript', (callId: string, text: string) => {
+      process.stdout.write(`\r${COLORS.dim}[${new Date().toLocaleTimeString()}] 👂 "${text}"${' '.repeat(20)}${COLORS.reset}`);
     });
 
     agent.on('metrics', (turnId: string, latency: any) => {

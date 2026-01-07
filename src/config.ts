@@ -30,6 +30,19 @@ export const config = {
     useRealtimeApi: false, // Toggle para testar Realtime vs Chat Completions
   },
 
+  // STT - Speech-to-Text
+  stt: {
+    // Provider: 'openai' (Whisper) ou 'elevenlabs' (Scribe - mais rápido)
+    provider: (process.env.STT_PROVIDER || 'elevenlabs') as 'openai' | 'elevenlabs',
+    // Configuração específica do ElevenLabs Scribe
+    elevenlabs: {
+      modelId: 'scribe_v2_realtime',
+      sampleRate: 16000,
+      language: 'pt',
+      vadSilenceThresholdMs: 500, // Tempo de silêncio para detectar fim da fala
+    },
+  },
+
   // ElevenLabs - TTS
   elevenlabs: {
     apiKey: process.env.ELEVENLABS_API_KEY!,
@@ -65,6 +78,7 @@ Regras:
 - Se não entender algo, peça para repetir educadamente
 - Nunca invente informações sobre preços específicos
 - Se a pessoa não tiver interesse, agradeça e encerre educadamente
+- NÃO comece suas respostas com palavras como "Entendi", "Certo", "Então", "Perfeito" - vá direto ao ponto
 
 Contexto atual: {context}
 Nome do prospect: {prospectName}
@@ -76,35 +90,33 @@ Empresa: {companyName}
     maxCallDurationMs: 5 * 60 * 1000, // 5 minutos
   },
 
-  // Fillers (frases de preenchimento)
+  // Fillers (frases de preenchimento) - Curtos e naturais como onomatopeias
   fillers: {
-    // Fillers genéricos (sem nome)
+    // Fillers genéricos - sons curtos e naturais (~0.2-0.5s)
     generic: [
-      'Entendi...',
-      'Certo...',
-      'Perfeito...',
-      'Deixa eu ver...',
-      'Um momento...',
-      'Interessante...',
+      'Uhum...',       // ~0.3s
+      'Hmm...',        // ~0.3s
+      'Ah sim...',     // ~0.5s
+      'Tá...',         // ~0.2s
+      'Aham...',       // ~0.3s
+      'Sei...',        // ~0.3s
     ],
     // Templates com nome (usar {name} como placeholder)
     withName: [
-      'Então {name}...',
-      'Perfeito {name}, deixa eu te explicar...',
-      'Entendi {name}...',
-      '{name}, boa pergunta...',
+      'Tá, {name}...',
+      'Hmm, {name}...',
+      '{name}...',
     ],
-    // Fillers para transição
+    // Fillers para transição - curtos
     transition: [
-      'Bom, sobre isso...',
-      'Olha, na verdade...',
-      'Então, basicamente...',
+      'Então...',      // ~0.4s
+      'Bom...',        // ~0.3s
+      'Olha...',       // ~0.3s
     ],
-    // Fillers para quando não entendeu
+    // Fillers para clarificação - simples
     clarification: [
-      'Desculpa, não entendi bem...',
-      'Pode repetir por favor?',
-      'Como assim?',
+      'Hmm...',
+      'Ah...',
     ],
   },
 

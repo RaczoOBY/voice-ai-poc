@@ -85,7 +85,11 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
   
   // Callbacks
   private audioCallbacks: Map<string, (audio: Buffer) => void> = new Map();
+  private audioChunkCallbacks: Map<string, (chunk: Buffer) => void> = new Map(); // Para streaming (Scribe)
   private callEventCallback?: (event: TelnyxCallEvent) => void;
+  
+  // Modo de VAD: 'internal' (manual) ou 'external' (Scribe)
+  private vadMode: 'internal' | 'external' = 'internal';
   
   // Estado do VAD
   private audioBuffer: Buffer[] = [];
@@ -226,13 +230,46 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
   }
 
   /**
-   * Processa chunk de áudio e faz VAD simples
-   * Com confirmação de barge-in para evitar falsos positivos
-   * Com proteção contra feedback (microfone capturando speaker)
+   * Processa chunk de áudio
+   * 
+   * Modo 'external' (Scribe): Envia chunks diretamente para o Scribe que tem VAD integrado
+   * Modo 'internal' (Whisper): Faz VAD manual baseado em energia
+   * 
+   * Em ambos os modos, mantém a lógica de barge-in para interromper reprodução
    */
   private processAudioChunk(callId: string, chunk: Buffer): void {
     const now = Date.now();
+    const energy = this.calculateEnergy(chunk);
     
+    // MODO EXTERNO (Scribe): Envia chunks diretamente, VAD é feito pelo Scribe
+    if (this.vadMode === 'external') {
+      // Enviar chunk para o Scribe em tempo real
+      const chunkCallback = this.audioChunkCallbacks.get(callId);
+      if (chunkCallback) {
+        chunkCallback(chunk);
+      }
+      
+      // Manter lógica de barge-in mesmo no modo externo
+      const bargeInThreshold = VAD_CONFIG.ENERGY_THRESHOLD * VAD_CONFIG.BARGE_IN_ENERGY_MULTIPLIER;
+      if (energy > bargeInThreshold) {
+        this.consecutiveSpeechFrames++;
+        if (this.isPlaying && 
+            !this.bargeInTriggered && 
+            this.consecutiveSpeechFrames >= VAD_CONFIG.BARGE_IN_CONFIRM_FRAMES) {
+          this.logger.info(`🔇 Barge-in confirmado!`);
+          this.stopPlayback();
+          this.playbackInterrupted = true;
+          this.bargeInTriggered = true;
+          this.emit('playback:interrupted', callId);
+        }
+      } else {
+        this.consecutiveSpeechFrames = 0;
+        this.bargeInTriggered = false;
+      }
+      return;
+    }
+    
+    // MODO INTERNO (Whisper): VAD manual baseado em energia
     // PROTEÇÃO CONTRA FEEDBACK:
     // Ignorar microfone enquanto está reproduzindo ou logo após parar
     if (VAD_CONFIG.MUTE_MIC_DURING_PLAYBACK) {
@@ -248,9 +285,6 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
         return;
       }
     }
-    
-    // Calcular energia do chunk
-    const energy = this.calculateEnergy(chunk);
     
     // Threshold mais alto para barge-in (evita ruídos)
     const bargeInThreshold = VAD_CONFIG.ENERGY_THRESHOLD * VAD_CONFIG.BARGE_IN_ENERGY_MULTIPLIER;
@@ -613,10 +647,37 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
   }
 
   /**
-   * Registra callback para áudio capturado
+   * Registra callback para áudio capturado (após VAD detectar fim da fala)
+   * Usado no modo 'internal' VAD (OpenAI Whisper)
    */
   onAudioReceived(callId: string, callback: (audio: Buffer) => void): void {
     this.audioCallbacks.set(callId, callback);
+  }
+
+  /**
+   * Registra callback para chunks de áudio em tempo real
+   * Usado no modo 'external' VAD (ElevenLabs Scribe)
+   * Cada chunk é enviado imediatamente sem esperar VAD
+   */
+  onAudioChunk(callId: string, callback: (chunk: Buffer) => void): void {
+    this.audioChunkCallbacks.set(callId, callback);
+  }
+
+  /**
+   * Define o modo de VAD
+   * - 'internal': VAD manual baseado em energia (para OpenAI Whisper)
+   * - 'external': Repassa chunks diretamente (para ElevenLabs Scribe com VAD integrado)
+   */
+  setVADMode(mode: 'internal' | 'external'): void {
+    this.vadMode = mode;
+    this.logger.info(`🎛️ Modo VAD: ${mode === 'internal' ? 'Interno (manual)' : 'Externo (Scribe)'}`);
+  }
+
+  /**
+   * Retorna o modo de VAD atual
+   */
+  getVADMode(): 'internal' | 'external' {
+    return this.vadMode;
   }
 
   /**

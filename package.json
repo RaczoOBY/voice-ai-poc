@@ -12,6 +12,7 @@
     "test:latency": "tsx src/tests/latency-benchmark.ts",
     "test:elevenlabs": "tsx src/scripts/test-elevenlabs.ts",
     "test:mic": "tsx src/scripts/test-microphone.ts",
+    "test:scribe": "tsx src/scripts/test-scribe.ts",
     "preload-fillers": "tsx src/scripts/preload-fillers.ts",
     "lint": "eslint src/**/*.ts",
     "typecheck": "tsc --noEmit"

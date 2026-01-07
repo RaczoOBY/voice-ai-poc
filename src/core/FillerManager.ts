@@ -92,6 +92,7 @@ export class FillerManager implements IFillerManager {
 
   /**
    * Gera áudios para uma categoria de fillers
+   * Usa synthesizeFiller() se disponível para voz mais natural
    */
   private async generateFillerCategory(
     texts: string[],
@@ -101,7 +102,11 @@ export class FillerManager implements IFillerManager {
 
     for (const text of texts) {
       try {
-        const result = await this.tts.synthesize(text);
+        // Usar synthesizeFiller se disponível (voz mais natural para fillers)
+        const result = this.tts.synthesizeFiller 
+          ? await this.tts.synthesizeFiller(text)
+          : await this.tts.synthesize(text);
+          
         fillers.push({
           text,
           audioBuffer: result.audioBuffer,
@@ -181,28 +186,33 @@ export class FillerManager implements IFillerManager {
 
   /**
    * Detecta se a mensagem do usuário indica que não foi entendida
+   * CUIDADO: Ser muito específico para evitar falsos positivos
    */
   private needsClarification(message?: string): boolean {
     if (!message) return false;
     
-    const clarificationIndicators = [
-      'não entendi',
-      'pode repetir',
-      'como assim',
-      'o que',
-      'hm',
-      'ahn',
-    ];
-    
     const normalized = message.toLowerCase().trim();
     
-    // Mensagem muito curta pode indicar confusão
-    if (normalized.length < 5) {
+    // Só considera clarificação se a mensagem for MUITO curta (< 3 chars)
+    // ou se contiver frases EXATAS de confusão
+    if (normalized.length < 3) {
       return true;
     }
     
-    return clarificationIndicators.some((indicator) =>
-      normalized.includes(indicator)
+    // Frases EXATAS que indicam que o usuário não entendeu
+    const exactPhrases = [
+      'não entendi',
+      'não entendi bem',
+      'pode repetir',
+      'repete por favor',
+      'como assim?',  // Com interrogação
+      'oi?',
+      'hã?',
+      'o que?',  // Só "o que?" isolado
+    ];
+    
+    return exactPhrases.some((phrase) => 
+      normalized === phrase || normalized.startsWith(phrase + ' ') || normalized.endsWith(' ' + phrase)
     );
   }
 
