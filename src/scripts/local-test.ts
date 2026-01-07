@@ -1,0 +1,184 @@
+#!/usr/bin/env npx tsx
+/**
+ * Script de teste local para Voice AI
+ * 
+ * Permite testar todo o pipeline STT → LLM → TTS
+ * usando o microfone e alto-falante do computador.
+ * 
+ * Uso: npm run local
+ * 
+ * Requisitos:
+ * - macOS: brew install sox portaudio
+ * - Linux: apt-get install sox libsox-fmt-all
+ */
+
+import { config, validateConfig } from '../config';
+import { LocalAudioProvider } from '../providers/LocalAudioProvider';
+import { OpenAITranscriber } from '../providers/OpenAITranscriber';
+import { OpenAILLM } from '../providers/OpenAILLM';
+import { ElevenLabsTTS } from '../providers/ElevenLabsTTS';
+import { StreamingVoiceAgent } from '../core/StreamingVoiceAgent';
+import { Logger } from '../utils/Logger';
+
+const logger = new Logger('LocalTest');
+
+// Cores para o terminal
+const COLORS = {
+  reset: '\x1b[0m',
+  bright: '\x1b[1m',
+  dim: '\x1b[2m',
+  green: '\x1b[32m',
+  yellow: '\x1b[33m',
+  blue: '\x1b[34m',
+  magenta: '\x1b[35m',
+  cyan: '\x1b[36m',
+  white: '\x1b[37m',
+  bgBlue: '\x1b[44m',
+};
+
+function printBanner(): void {
+  console.clear();
+  console.log(`
+${COLORS.cyan}╔══════════════════════════════════════════════════════════════╗
+║${COLORS.bright}              VOICE AI POC - MODO LOCAL                       ${COLORS.reset}${COLORS.cyan}║
+╠══════════════════════════════════════════════════════════════╣
+║${COLORS.reset} Status: ${COLORS.green}Iniciando...${COLORS.reset}                                       ${COLORS.cyan}║
+║${COLORS.reset} Pressione ${COLORS.yellow}CTRL+C${COLORS.reset} para sair                                 ${COLORS.cyan}║
+╚══════════════════════════════════════════════════════════════╝${COLORS.reset}
+`);
+}
+
+function printStatus(status: string): void {
+  process.stdout.write(`\r${COLORS.dim}[${new Date().toLocaleTimeString()}]${COLORS.reset} ${status}          `);
+}
+
+function printMessage(role: 'user' | 'agent', message: string): void {
+  const icon = role === 'user' ? '👤' : '🤖';
+  const color = role === 'user' ? COLORS.blue : COLORS.green;
+  const label = role === 'user' ? 'Usuário' : 'Agente';
+  
+  // Truncar mensagem se muito longa
+  const displayMessage = message.length > 60 
+    ? message.substring(0, 60) + '...' 
+    : message;
+  
+  console.log(`\n${COLORS.dim}[${new Date().toLocaleTimeString()}]${COLORS.reset} ${icon} ${color}${label}:${COLORS.reset} "${displayMessage}"`);
+}
+
+function printMetrics(metrics: { stt: number; llm: number; tts: number; total: number; timeToFirstAudio: number }): void {
+  console.log(`${COLORS.dim}           ⏱️  STT: ${metrics.stt}ms | LLM: ${metrics.llm}ms | TTS: ${metrics.tts}ms${COLORS.reset}`);
+  console.log(`${COLORS.dim}           ⚡ Time to First Audio: ${COLORS.yellow}${metrics.timeToFirstAudio}ms${COLORS.reset}`);
+}
+
+function printBargeIn(): void {
+  console.log(`\n${COLORS.yellow}🔇 Barge-in detectado! Parando reprodução...${COLORS.reset}`);
+}
+
+async function main(): Promise<void> {
+  printBanner();
+
+  try {
+    // Validar configuração
+    logger.info('Validando configuração...');
+    validateConfig();
+    logger.info('✅ Configuração OK');
+
+    // Verificar dependências do sistema
+    console.log(`\n${COLORS.yellow}⚠️  Certifique-se de ter instalado:${COLORS.reset}`);
+    console.log(`   ${COLORS.dim}macOS: brew install sox portaudio${COLORS.reset}`);
+    console.log(`   ${COLORS.dim}Linux: apt-get install sox libsox-fmt-all${COLORS.reset}\n`);
+
+    // Inicializar providers
+    logger.info('Inicializando providers...');
+    
+    const localProvider = new LocalAudioProvider();
+    const transcriber = new OpenAITranscriber(config.openai);
+    const llm = new OpenAILLM(config.openai);
+    const tts = new ElevenLabsTTS(config.elevenlabs);
+
+    logger.info('✅ Providers inicializados');
+
+    // Warmup do TTS
+    logger.info('🔥 Aquecendo conexão com ElevenLabs...');
+    await tts.warmup();
+    logger.info('✅ TTS aquecido');
+
+    // Criar agente de streaming
+    const agent = new StreamingVoiceAgent({
+      transcriber,
+      llm,
+      tts,
+      systemPrompt: config.agent.systemPrompt,
+      localProvider,
+    });
+
+    // Registrar listeners
+    agent.on('user:spoke', (callId: string, text: string) => {
+      printMessage('user', text);
+    });
+
+    agent.on('agent:spoke', (callId: string, text: string) => {
+      printMessage('agent', text);
+    });
+
+    agent.on('metrics', (turnId: string, latency: any) => {
+      printMetrics(latency);
+    });
+
+    localProvider.on('playback:interrupted', () => {
+      printBargeIn();
+    });
+
+    agent.on('session:ended', (callId: string, summary: any) => {
+      console.log(`\n${COLORS.cyan}╔══════════════════════════════════════════════════════════════╗`);
+      console.log(`║${COLORS.bright}                    SESSÃO ENCERRADA                          ${COLORS.reset}${COLORS.cyan}║`);
+      console.log(`╠══════════════════════════════════════════════════════════════╣${COLORS.reset}`);
+      console.log(`${COLORS.cyan}║${COLORS.reset} Duração: ${Math.round(summary.duration / 1000)}s                                              ${COLORS.cyan}║`);
+      console.log(`${COLORS.cyan}║${COLORS.reset} Turnos: ${summary.turns}                                                ${COLORS.cyan}║`);
+      console.log(`${COLORS.cyan}║${COLORS.reset} Latência média STT: ${summary.metrics.averageLatency.stt}ms                            ${COLORS.cyan}║`);
+      console.log(`${COLORS.cyan}║${COLORS.reset} Latência média LLM: ${summary.metrics.averageLatency.llm}ms                            ${COLORS.cyan}║`);
+      console.log(`${COLORS.cyan}║${COLORS.reset} Time to First Audio médio: ${summary.metrics.averageLatency.timeToFirstAudio}ms                  ${COLORS.cyan}║`);
+      console.log(`${COLORS.cyan}╚══════════════════════════════════════════════════════════════╝${COLORS.reset}`);
+    });
+
+    // Iniciar sessão
+    console.log(`\n${COLORS.green}🎤 Iniciando sessão de voz...${COLORS.reset}`);
+    console.log(`${COLORS.dim}   Fale algo quando o agente terminar de se apresentar.${COLORS.reset}`);
+    console.log(`${COLORS.dim}   Você pode interromper o agente falando por cima (barge-in).${COLORS.reset}\n`);
+
+    const callId = await agent.startLocalSession({
+      name: process.env.PROSPECT_NAME || 'Visitante',
+      company: process.env.PROSPECT_COMPANY || 'Empresa Teste',
+    });
+
+    // Handler para CTRL+C
+    process.on('SIGINT', async () => {
+      console.log(`\n\n${COLORS.yellow}⏹️  Encerrando sessão...${COLORS.reset}`);
+      await agent.endSession(callId);
+      process.exit(0);
+    });
+
+    // Manter processo rodando
+    printStatus(`${COLORS.green}Ouvindo...${COLORS.reset} (CTRL+C para sair)`);
+
+  } catch (error) {
+    logger.error('❌ Erro fatal:', error);
+    
+    if (error instanceof Error) {
+      if (error.message.includes('sox') || error.message.includes('spawn')) {
+        console.log(`\n${COLORS.yellow}💡 Dica: Instale o SoX com:${COLORS.reset}`);
+        console.log(`   ${COLORS.cyan}brew install sox portaudio${COLORS.reset} (macOS)`);
+        console.log(`   ${COLORS.cyan}apt-get install sox libsox-fmt-all${COLORS.reset} (Linux)`);
+      } else if (error.message.includes('OPENAI')) {
+        console.log(`\n${COLORS.yellow}💡 Dica: Verifique sua OPENAI_API_KEY no .env${COLORS.reset}`);
+      } else if (error.message.includes('ELEVENLABS')) {
+        console.log(`\n${COLORS.yellow}💡 Dica: Verifique sua ELEVENLABS_API_KEY no .env${COLORS.reset}`);
+      }
+    }
+    
+    process.exit(1);
+  }
+}
+
+// Executar
+main();

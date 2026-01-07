@@ -5,13 +5,19 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
+// Modo de execução: 'local' (microfone/speaker) ou 'telnyx' (telefonia)
+export type ExecutionMode = 'local' | 'telnyx';
+
 export const config = {
-  // Telnyx - Telefonia
+  // Modo de execução
+  mode: (process.env.MODE || 'local') as ExecutionMode,
+
+  // Telnyx - Telefonia (só necessário se mode === 'telnyx')
   telnyx: {
-    apiKey: process.env.TELNYX_API_KEY!,
-    connectionId: process.env.TELNYX_CONNECTION_ID!,
-    phoneNumber: process.env.TELNYX_PHONE_NUMBER!, // Número brasileiro
-    webhookUrl: process.env.WEBHOOK_URL!,
+    apiKey: process.env.TELNYX_API_KEY || '',
+    connectionId: process.env.TELNYX_CONNECTION_ID || '',
+    phoneNumber: process.env.TELNYX_PHONE_NUMBER || '',
+    webhookUrl: process.env.WEBHOOK_URL || '',
   },
 
   // OpenAI - Transcrição + LLM
@@ -126,12 +132,24 @@ Empresa: {companyName}
 
 // Validação de configuração
 export function validateConfig(): void {
-  const required = [
-    'TELNYX_API_KEY',
-    'TELNYX_CONNECTION_ID',
+  // Variáveis sempre necessárias
+  const alwaysRequired = [
     'OPENAI_API_KEY',
     'ELEVENLABS_API_KEY',
   ];
+
+  // Variáveis necessárias apenas no modo Telnyx
+  const telnyxRequired = [
+    'TELNYX_API_KEY',
+    'TELNYX_CONNECTION_ID',
+  ];
+
+  let required = [...alwaysRequired];
+  
+  // Se estiver no modo Telnyx, adiciona as variáveis de telefonia
+  if (config.mode === 'telnyx') {
+    required = [...required, ...telnyxRequired];
+  }
 
   const missing = required.filter((key) => !process.env[key]);
   
@@ -139,3 +157,23 @@ export function validateConfig(): void {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
   }
 }
+
+// Configuração de streaming
+export const streamingConfig = {
+  // Mínimo de caracteres antes de enviar para TTS
+  minCharsForTTS: 15,
+  // Máximo de caracteres no buffer antes de forçar flush
+  maxBufferChars: 50,
+  // Delimitadores que forçam flush para TTS
+  sentenceDelimiters: ['.', '!', '?', ':', ';', ','],
+};
+
+// Configuração de VAD (Voice Activity Detection)
+export const vadConfig = {
+  // Threshold de energia para detectar fala (0-1)
+  energyThreshold: 0.01,
+  // Duração de silêncio para considerar fim de fala (ms)
+  silenceDurationMs: 800,
+  // Duração mínima de fala para processar (ms)
+  minSpeechDurationMs: 300,
+};

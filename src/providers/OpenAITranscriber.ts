@@ -29,14 +29,20 @@ export class OpenAITranscriber implements ITranscriber {
 
   /**
    * Transcreve áudio para texto
+   * @param audioBuffer - Buffer de áudio PCM raw (16-bit, mono)
+   * @param sampleRate - Taxa de amostragem do áudio (padrão 16000 para microfone)
    */
-  async transcribe(audioBuffer: Buffer): Promise<TranscriptionResult> {
+  async transcribe(audioBuffer: Buffer, sampleRate: number = 16000): Promise<TranscriptionResult> {
     const startTime = Date.now();
-    this.logger.debug(`🎤 Transcrevendo ${audioBuffer.length} bytes...`);
+    this.logger.debug(`🎤 Transcrevendo ${audioBuffer.length} bytes de PCM...`);
 
     try {
+      // Converter PCM raw para WAV (necessário para a API Whisper)
+      const wavBuffer = this.convertPcmToWav(audioBuffer, sampleRate, 1, 16);
+      this.logger.debug(`📦 Convertido para WAV: ${wavBuffer.length} bytes`);
+      
       // Converter Buffer para File-like object
-      const audioFile = await this.bufferToFile(audioBuffer, 'audio.wav');
+      const audioFile = await this.bufferToFile(wavBuffer, 'audio.wav');
 
       const response = await this.client.audio.transcriptions.create({
         file: audioFile,

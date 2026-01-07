@@ -5,15 +5,20 @@
  * - Síntese batch
  * - Streaming para menor latência
  * - Múltiplas vozes e modelos
+ * 
+ * Nota: Usa fetch direto ao invés da biblioteca elevenlabs
+ * devido a bugs de autenticação na biblioteca npm.
  */
 
-import { ElevenLabsClient } from 'elevenlabs';
+import { ElevenLabsClient } from '@elevenlabs/elevenlabs-js';
 import {
   ITTS,
   ElevenLabsConfig,
   TTSResult,
 } from '../types';
 import { Logger } from '../utils/Logger';
+
+const ELEVENLABS_API_BASE = 'https://api.elevenlabs.io/v1';
 
 export class ElevenLabsTTS implements ITTS {
   private client: ElevenLabsClient;
@@ -29,40 +34,48 @@ export class ElevenLabsTTS implements ITTS {
   }
 
   /**
-   * Sintetiza texto em áudio
+   * Sintetiza texto em áudio usando fetch direto
+   * Retorna PCM 16-bit 16kHz mono para compatibilidade com speaker
    */
   async synthesize(text: string): Promise<TTSResult> {
     const startTime = Date.now();
     this.logger.debug(`🔊 Sintetizando: "${text.substring(0, 50)}..."`);
 
     try {
-      // Usar o método de streaming para baixa latência
-      const audioStream = await this.client.textToSpeech.convert(
-        this.config.voiceId,
+      // Usar output_format=pcm_22050 para obter PCM raw compatível com speaker
+      const response = await fetch(
+        `${ELEVENLABS_API_BASE}/text-to-speech/${this.config.voiceId}?output_format=pcm_22050`,
         {
-          text,
-          model_id: this.config.model, // 'eleven_flash_v2_5' para baixa latência
-          voice_settings: {
-            stability: this.config.stability,
-            similarity_boost: this.config.similarityBoost,
-            style: this.config.style,
-            use_speaker_boost: true,
+          method: 'POST',
+          headers: {
+            'Accept': 'audio/pcm',
+            'Content-Type': 'application/json',
+            'xi-api-key': this.config.apiKey,
           },
-          output_format: this.config.outputFormat as any, // 'pcm_16000' para telefonia
+          body: JSON.stringify({
+            text,
+            model_id: this.config.model,
+            voice_settings: {
+              stability: this.config.stability,
+              similarity_boost: this.config.similarityBoost,
+              style: this.config.style,
+              use_speaker_boost: true,
+            },
+          }),
         }
       );
 
-      // Coletar chunks do stream
-      const chunks: Buffer[] = [];
-      for await (const chunk of audioStream) {
-        chunks.push(Buffer.from(chunk));
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(`ElevenLabs API error ${response.status}: ${errorBody}`);
       }
 
-      const audioBuffer = Buffer.concat(chunks);
+      const arrayBuffer = await response.arrayBuffer();
+      const audioBuffer = Buffer.from(arrayBuffer);
       const duration = Date.now() - startTime;
 
-      // Estimar duração do áudio (PCM 16kHz mono = 32000 bytes/segundo)
-      const audioDuration = audioBuffer.length / 32000;
+      // PCM 22050Hz mono 16-bit = 44100 bytes/segundo
+      const audioDuration = audioBuffer.length / 44100;
 
       const result: TTSResult = {
         audioBuffer,
@@ -79,35 +92,57 @@ export class ElevenLabsTTS implements ITTS {
   }
 
   /**
-   * Sintetiza com streaming (envia chunks conforme ficam prontos)
+   * Sintetiza com streaming usando fetch direto
+   * Retorna PCM 16-bit 16kHz mono para compatibilidade com speaker
    */
   async synthesizeStream(text: string, onChunk: (chunk: Buffer) => void): Promise<void> {
     const startTime = Date.now();
     this.logger.debug(`🔊 Sintetizando com stream: "${text.substring(0, 50)}..."`);
 
     try {
-      const audioStream = await this.client.textToSpeech.convertAsStream(
-        this.config.voiceId,
+      // Usar output_format=pcm_22050 para obter PCM raw compatível com speaker
+      const response = await fetch(
+        `${ELEVENLABS_API_BASE}/text-to-speech/${this.config.voiceId}/stream?output_format=pcm_22050`,
         {
-          text,
-          model_id: this.config.model,
-          voice_settings: {
-            stability: this.config.stability,
-            similarity_boost: this.config.similarityBoost,
-            style: this.config.style,
-            use_speaker_boost: true,
+          method: 'POST',
+          headers: {
+            'Accept': 'audio/pcm',
+            'Content-Type': 'application/json',
+            'xi-api-key': this.config.apiKey,
           },
-          output_format: this.config.outputFormat as any,
+          body: JSON.stringify({
+            text,
+            model_id: this.config.model,
+            voice_settings: {
+              stability: this.config.stability,
+              similarity_boost: this.config.similarityBoost,
+              style: this.config.style,
+              use_speaker_boost: true,
+            },
+          }),
         }
       );
 
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(`ElevenLabs API error ${response.status}: ${errorBody}`);
+      }
+
+      if (!response.body) {
+        throw new Error('Response body is null');
+      }
+
+      const reader = response.body.getReader();
       let firstChunkReceived = false;
       let totalBytes = 0;
 
-      for await (const chunk of audioStream) {
-        const buffer = Buffer.from(chunk);
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const buffer = Buffer.from(value);
         totalBytes += buffer.length;
-        
+
         if (!firstChunkReceived) {
           const ttfb = Date.now() - startTime;
           this.logger.info(`⚡ TTS Time-to-First-Byte: ${ttfb}ms`);
@@ -132,7 +167,7 @@ export class ElevenLabsTTS implements ITTS {
     const response = await this.client.voices.getAll();
     
     return response.voices.map((voice) => ({
-      id: voice.voice_id,
+      id: voice.voiceId,
       name: voice.name || 'Unknown',
       labels: voice.labels || {},
     }));
@@ -145,7 +180,7 @@ export class ElevenLabsTTS implements ITTS {
     const voice = await this.client.voices.get(voiceId);
     
     return {
-      id: voice.voice_id,
+      id: voice.voiceId,
       name: voice.name || 'Unknown',
       samples: voice.samples?.length || 0,
     };

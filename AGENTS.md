@@ -53,10 +53,13 @@ cp .env.example .env
 # 2. Instalar dependências
 npm install
 
-# 3. Pré-carregar fillers (recomendado)
-npm run preload-fillers
+# 3. Instalar SoX (necessário para modo local)
+brew install sox portaudio  # macOS
 
-# 4. Iniciar em dev
+# 4. Modo LOCAL (microfone/speaker) - Recomendado para testar
+npm run local
+
+# 5. Modo TELNYX (telefonia real)
 npm run dev
 ```
 

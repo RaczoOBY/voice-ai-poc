@@ -6,17 +6,23 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsx watch src/index.ts",
+    "dev": "MODE=telnyx tsx watch src/index.ts",
+    "local": "MODE=local tsx src/scripts/local-test.ts",
     "test": "jest",
     "test:latency": "tsx src/tests/latency-benchmark.ts",
+    "test:elevenlabs": "tsx src/scripts/test-elevenlabs.ts",
+    "test:mic": "tsx src/scripts/test-microphone.ts",
     "preload-fillers": "tsx src/scripts/preload-fillers.ts",
     "lint": "eslint src/**/*.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@elevenlabs/elevenlabs-js": "^2.29.0",
+    "@ricky0123/vad-node": "^0.0.3",
     "dotenv": "^17.2.3",
-    "elevenlabs": "^1.59.0",
+    "node-record-lpcm16": "^1.0.1",
     "openai": "^6.15.0",
+    "speaker": "^0.5.5",
     "telnyx": "^4.6.0",
     "uuid": "^13.0.0",
     "ws": "^8.19.0"
