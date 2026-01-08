@@ -73,6 +73,8 @@ export class StreamingVoiceAgent extends EventEmitter {
   private useStreamingSTT: boolean = false; // Usa STT em streaming (Scribe)
   private contextualFillerManager: ContextualFillerManager | null = null; // Fillers contextualizados (desabilitados por enquanto)
   private wasInterrupted: boolean = false; // Flag para indicar que houve barge-in
+  private bargeInTimestamp: number = 0; // Timestamp do último barge-in
+  private static readonly BARGE_IN_GRACE_PERIOD_MS = 800; // Ignorar transcrições por 800ms após barge-in
   private pendingTranscriptionCallId: string | null = null; // CallId da transcrição que está sendo processada
   
   // Pré-processamento com transcrições parciais
@@ -226,6 +228,7 @@ export class StreamingVoiceAgent extends EventEmitter {
     // Listener para barge-in
     this.config.localProvider.on('playback:interrupted', (interruptedCallId: string) => {
       this.wasInterrupted = true;
+      this.bargeInTimestamp = Date.now();
       
       if (this.currentMetrics) {
         this.currentMetrics.interrupted = true;
@@ -245,8 +248,14 @@ export class StreamingVoiceAgent extends EventEmitter {
         this.pendingTranscriptionCallId = null;
       }
       
-      // Resetar flags para permitir novo processamento após barge-in
-      // (mas manter wasInterrupted para ignorar transcrições que chegam logo após)
+      // Auto-reset do flag após grace period
+      setTimeout(() => {
+        if (this.bargeInTimestamp > 0 && Date.now() - this.bargeInTimestamp >= StreamingVoiceAgent.BARGE_IN_GRACE_PERIOD_MS) {
+          this.wasInterrupted = false;
+          this.bargeInTimestamp = 0;
+          this.logger.debug('✅ Flag de barge-in auto-resetada após grace period');
+        }
+      }, StreamingVoiceAgent.BARGE_IN_GRACE_PERIOD_MS + 100);
     });
 
     // Iniciar gravação
@@ -501,9 +510,18 @@ EMPRESA: ${session.companyName || 'Não informada'}`,
     }
 
     // Verificar se houve barge-in ANTES de qualquer processamento
-    if (this.wasInterrupted) {
-      this.logger.debug('⚠️ Ignorando transcrição devido a barge-in recente');
-      return; // Flag será resetada no finally do processamento anterior
+    // Usar timestamp para garantir que o grace period seja respeitado
+    const timeSinceBargeIn = Date.now() - this.bargeInTimestamp;
+    if (this.wasInterrupted && timeSinceBargeIn < StreamingVoiceAgent.BARGE_IN_GRACE_PERIOD_MS) {
+      this.logger.debug(`⚠️ Ignorando transcrição devido a barge-in recente (${timeSinceBargeIn}ms atrás)`);
+      return;
+    }
+    
+    // Resetar flag se passou o grace period
+    if (this.wasInterrupted && timeSinceBargeIn >= StreamingVoiceAgent.BARGE_IN_GRACE_PERIOD_MS) {
+      this.wasInterrupted = false;
+      this.bargeInTimestamp = 0;
+      this.logger.debug('✅ Flag de barge-in resetada (grace period expirado)');
     }
 
     // Ignorar enquanto agente fala (a menos que tenha sido interrompido)
@@ -651,14 +669,7 @@ EMPRESA: ${session.companyName || 'Não informada'}`,
       this.isProcessing = false;
       this.pendingTranscriptionCallId = null;
       this.resetPreprocessingState(); // Garantir reset do estado de pré-processamento
-      // Resetar flag de interrupção apenas se não houver novo barge-in
-      // Delay para permitir que novas transcrições sejam ignoradas se vierem logo após barge-in
-      if (this.wasInterrupted) {
-        setTimeout(() => {
-          this.wasInterrupted = false;
-          this.logger.debug('✅ Flag de barge-in resetada');
-        }, 1000); // 1 segundo de "grace period"
-      }
+      // Flag de barge-in é resetada automaticamente após o grace period (800ms)
     }
   }
 

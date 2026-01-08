@@ -57,8 +57,10 @@ interface RecordModule {
   }): RecordingInstance;
 }
 
-// Constantes de áudio - 22050Hz é o padrão do ElevenLabs PCM
-const SAMPLE_RATE = 22050;
+// Constantes de áudio
+// IMPORTANTE: Scribe (STT) usa 16000Hz, TTS usa 22050Hz
+const MIC_SAMPLE_RATE = 16000;      // Para gravação do microfone (Scribe espera 16kHz)
+const PLAYBACK_SAMPLE_RATE = 22050; // Para reprodução do TTS (ElevenLabs envia 22050Hz)
 const CHANNELS = 1;
 const BIT_DEPTH = 16;
 
@@ -68,9 +70,9 @@ const VAD_CONFIG = {
   SILENCE_DURATION_MS: 1000,     // 1s de silêncio = fim da fala
   MIN_SPEECH_DURATION_MS: 500,   // Mínimo de 500ms para considerar fala
   FRAME_SIZE_MS: 30,             // Tamanho do frame para análise (30ms)
-  // Configurações de confirmação de barge-in
-  BARGE_IN_CONFIRM_FRAMES: 5,    // Frames consecutivos com fala para confirmar barge-in (~150ms)
-  BARGE_IN_ENERGY_MULTIPLIER: 1.5, // Energia deve ser 1.5x o threshold para barge-in
+  // Configurações de confirmação de barge-in - MAIS SENSÍVEL
+  BARGE_IN_CONFIRM_FRAMES: 3,    // Frames consecutivos (~90ms) - reduzido de 5 para detecção mais rápida
+  BARGE_IN_ENERGY_MULTIPLIER: 1.2, // Energia deve ser 1.2x o threshold - reduzido de 1.5 para maior sensibilidade
   // Proteção contra feedback (microfone capturando o speaker)
   // ⚠️ Se true: sem feedback, mas sem barge-in
   // ⚠️ Se false: com barge-in, mas pode ter feedback (use fones de ouvido!)
@@ -191,7 +193,7 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
       const record = require('node-record-lpcm16');
       
       this.recorder = record.record({
-        sampleRate: SAMPLE_RATE,
+        sampleRate: MIC_SAMPLE_RATE, // 16kHz para Scribe
         channels: CHANNELS,
         threshold: 0, // Captura tudo, VAD é feito manualmente
         recorder: 'sox', // Usa SoX no macOS/Linux
@@ -263,11 +265,19 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
       if (this.isPlaying) {
         // Enquanto está reproduzindo, apenas verificar barge-in, mas NÃO enviar para Scribe
         const bargeInThreshold = VAD_CONFIG.ENERGY_THRESHOLD * VAD_CONFIG.BARGE_IN_ENERGY_MULTIPLIER;
+        
+        // Log de debug para monitorar níveis de energia durante playback
+        if (energy > VAD_CONFIG.ENERGY_THRESHOLD * 0.5) {
+          this.logger.debug(`🎤 Durante playback: energia=${energy.toFixed(4)}, threshold=${bargeInThreshold.toFixed(4)}, frames=${this.consecutiveSpeechFrames}`);
+        }
+        
         if (energy > bargeInThreshold) {
           this.consecutiveSpeechFrames++;
+          this.logger.debug(`🎤 Barge-in potencial: ${this.consecutiveSpeechFrames}/${VAD_CONFIG.BARGE_IN_CONFIRM_FRAMES} frames`);
+          
           if (!this.bargeInTriggered && 
               this.consecutiveSpeechFrames >= VAD_CONFIG.BARGE_IN_CONFIRM_FRAMES) {
-            this.logger.info(`🔇 Barge-in confirmado!`);
+            this.logger.info(`🔇 Barge-in confirmado! (energia: ${energy.toFixed(4)})`);
             this.stopPlayback();
             this.playbackInterrupted = true;
             this.bargeInTriggered = true;
@@ -276,6 +286,10 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
             this.lastPlaybackEndTime = Date.now() - LocalAudioProvider.PLAYBACK_COOLDOWN_MS;
           }
         } else {
+          // Resetar apenas se energia caiu significativamente
+          if (this.consecutiveSpeechFrames > 0) {
+            this.logger.debug(`🎤 Barge-in reset: energia muito baixa (${energy.toFixed(4)})`);
+          }
           this.consecutiveSpeechFrames = 0;
           this.bargeInTriggered = false;
         }
@@ -589,7 +603,7 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
       this.currentSpeaker = new this.Speaker({
         channels: CHANNELS,
         bitDepth: BIT_DEPTH,
-        sampleRate: SAMPLE_RATE,
+        sampleRate: PLAYBACK_SAMPLE_RATE, // 22050Hz para TTS
         signed: true,
       });
 
@@ -619,13 +633,13 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
   private isStreamingStarted: boolean = false;
   private streamDrainInterval: NodeJS.Timeout | null = null;
   
-  // Configuração do buffer de streaming
+  // Configuração do buffer de streaming (para playback a 22050Hz)
   // PRE_BUFFER: acumular este mínimo antes de começar a reproduzir
   // CHUNK_SIZE: tamanho ideal de cada chunk enviado ao speaker
   private static readonly PRE_BUFFER_MS = 200; // 200ms de buffer inicial
-  private static readonly PRE_BUFFER_BYTES = Math.floor(SAMPLE_RATE * 2 * (200 / 1000)); // ~8820 bytes
+  private static readonly PRE_BUFFER_BYTES = Math.floor(PLAYBACK_SAMPLE_RATE * 2 * (200 / 1000)); // ~8820 bytes
   private static readonly DRAIN_INTERVAL_MS = 20; // Drenar buffer a cada 20ms
-  private static readonly CHUNK_SIZE = Math.floor(SAMPLE_RATE * 2 * (20 / 1000)); // ~882 bytes por 20ms
+  private static readonly CHUNK_SIZE = Math.floor(PLAYBACK_SAMPLE_RATE * 2 * (20 / 1000)); // ~882 bytes por 20ms
 
   /**
    * Reseta o estado de interrupção para permitir nova reprodução
@@ -672,7 +686,7 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
     this.currentSpeaker = new this.Speaker({
       channels: CHANNELS,
       bitDepth: BIT_DEPTH,
-      sampleRate: SAMPLE_RATE,
+      sampleRate: PLAYBACK_SAMPLE_RATE, // 22050Hz para TTS
       signed: true,
     });
 

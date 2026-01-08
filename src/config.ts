@@ -129,7 +129,7 @@ REGRAS IMPORTANTES:
 
   // Música de fundo (evita silêncio durante a ligação)
   backgroundMusic: {
-    enabled: true,                    // Habilitar música de fundo
+    enabled: true,                   // DESABILITADO - causava feedback no Scribe
     volume: 0.25,                     // Volume (0.0 a 1.0) - 25% para teste
     filePath: 'src/audio/fundo.mp3',  // Caminho do arquivo de áudio
   },
