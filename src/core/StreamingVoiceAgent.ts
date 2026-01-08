@@ -533,10 +533,14 @@ EMPRESA: ${session.companyName || 'Não informada'}`,
     const timingMetrics = transcription.timingMetrics;
     const sttRealLatency = timingMetrics?.realLatency || transcription.duration || 0;
     
+    // IMPORTANTE: sttEnd = momento atual (quando a transcrição final chegou)
+    // Isso é o ponto de referência para Time to First Audio
+    const now = Date.now();
+    
     this.currentMetrics = {
       turnId,
-      sttStart: timingMetrics?.startTime || Date.now() - sttRealLatency,
-      sttEnd: timingMetrics?.firstPartialTime || Date.now(),
+      sttStart: timingMetrics?.startTime || now - sttRealLatency,
+      sttEnd: now, // Momento que a transcrição final chegou (início do processamento LLM)
       llmStart: 0,
       llmFirstToken: 0,
       ttsStart: 0,
@@ -550,8 +554,9 @@ EMPRESA: ${session.companyName || 'Não informada'}`,
 
     const transcriptText = transcription.text.trim();
     
-    // Ignorar transcrições muito curtas (provavelmente falsos positivos ou palavras soltas)
-    if (transcriptText.length < 5 || transcriptText.split(/\s+/).length < 2) {
+    // Ignorar apenas transcrições extremamente curtas (ruído)
+    // Respostas de 1 palavra como "Sim", "Não", "Isso", "Ok" são válidas
+    if (transcriptText.length < 2) {
       this.logger.debug(`Ignorando transcrição muito curta: "${transcriptText}"`);
       this.isProcessing = false;
       this.pendingTranscriptionCallId = null;
@@ -689,8 +694,9 @@ EMPRESA: ${session.companyName || 'Não informada'}`,
 
     this.logger.info('🤖 Gerando resposta com streaming...');
     
-    // Gerar texto do LLM
-    const response = await this.config.llm.generate(messages, { maxTokens: 150 });
+    // Gerar texto do LLM - maxTokens reduzido para respostas mais rápidas e concisas
+    // 80 tokens ≈ 2-3 frases curtas, ideal para conversação natural
+    const response = await this.config.llm.generate(messages, { maxTokens: 80 });
     fullResponse = response.text;
     
     this.currentMetrics.llmFirstToken = Date.now();
@@ -819,12 +825,18 @@ EMPRESA: ${session.companyName || 'Não informada'}`,
       'eu', 'você', 'ele', 'ela', 'nós', 'eles', 'elas',
       // Outras palavras comuns
       'fogo', 'seu', 'sua', 'nosso', 'nossa',
+      // Palavras que podem começar frase mas não são nomes
+      'essa', 'esse', 'esta', 'este', 'aqui', 'agora', 'mesma', 'mesmo', 'aquela', 'aquele',
     ];
     
     // Padrões explícitos de apresentação (mais confiáveis)
     const explicitPatterns = [
       /(?:meu nome é|eu sou|sou o|sou a|me chamo|chamo-me|é o|é a|chamo)\s+([a-záàâãéêíóôõúç]{3,25})/i,
       /(?:fala com|está falando com|falo com)\s+([a-záàâãéêíóôõúç]{3,25})/i,
+      // Padrão para "com [Nome]" no final ou meio da frase (ex: "Essa mesma noite, com Oscar")
+      /,?\s*com\s+([A-ZÁÀÂÃÉÊÍÓÔÕÚÇ][a-záàâãéêíóôõúç]{2,20})\.?$/i,
+      // Padrão para "aqui é [Nome]" ou "aqui é o [Nome]"
+      /aqui (?:é|fala)\s+(?:o\s+|a\s+)?([a-záàâãéêíóôõúç]{3,25})/i,
     ];
 
     for (const pattern of explicitPatterns) {

@@ -72,7 +72,7 @@ const VAD_CONFIG = {
   // ⚠️ Se true: sem feedback, mas sem barge-in
   // ⚠️ Se false: com barge-in, mas pode ter feedback (use fones de ouvido!)
   MUTE_MIC_DURING_PLAYBACK: false,  // Desabilitado para permitir barge-in
-  PLAYBACK_COOLDOWN_MS: 300,        // Esperar 300ms após parar de tocar antes de ouvir
+  PLAYBACK_COOLDOWN_MS: 100,        // Esperar 100ms após parar de tocar (reduzido de 300ms)
 };
 
 export class LocalAudioProvider extends EventEmitter implements ITelephonyProvider {
@@ -107,7 +107,7 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
   
   // Proteção contra feedback de áudio
   private lastPlaybackEndTime: number = 0;
-  private static readonly PLAYBACK_COOLDOWN_MS = 300; // Esperar 300ms após parar de tocar antes de ouvir
+  private static readonly PLAYBACK_COOLDOWN_MS = 100; // Esperar 100ms após parar de tocar (reduzido de 300ms)
   
   // Lock para evitar inicialização múltipla simultânea
   private speakerInitPromise: Promise<void> | null = null;

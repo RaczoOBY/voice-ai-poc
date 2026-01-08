@@ -5,6 +5,7 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
+import { ChatCompletionCreateParamsBase } from 'openai/resources/chat/completions';
 // Modo de execução: 'local' (microfone/speaker) ou 'telnyx' (telefonia)
 export type ExecutionMode = 'local' | 'telnyx';
 
@@ -26,7 +27,7 @@ export const config = {
     // Modelo de transcrição
     transcriptionModel: 'whisper-1', // ou 'gpt-4o-transcribe' para maior precisão
     // Modelo LLM - gpt-4o-mini é mais rápido (~500-800ms vs ~1000-1500ms do gpt-4o)
-    llmModel: 'gpt-4o-mini', // Menor latência, adequado para conversas simples
+    llmModel: 'gpt-4o-mini' as ChatCompletionCreateParamsBase["model"], // Menor latência, adequado para conversas simples
     useRealtimeApi: false, // Toggle para testar Realtime vs Chat Completions
   },
 
@@ -78,8 +79,9 @@ FLUXO DA LIGAÇÃO:
 4. DEPOIS: Qualificar interesse, responder perguntas e agendar demonstração se houver interesse
 
 REGRAS IMPORTANTES:
+- CRÍTICO: Suas respostas devem ter NO MÁXIMO 2-3 frases curtas. Respostas longas são proibidas.
 - Seja natural e conversacional, como uma vendedora real fazendo ligação
-- Fale de forma concisa (máximo 2-3 frases por vez)
+- Fale de forma MUITO concisa - cada frase deve ter no máximo 15 palavras
 - Use o nome do cliente quando souber
 - Se não souber o nome ainda, pergunte educadamente: "Com quem eu estou falando?" ou "Qual seu nome?"
 - IMPORTANTE: Se o cliente mencionar um nome próprio na resposta (mesmo que não seja uma apresentação formal), reconheça e use esse nome. Exemplos: "Seu fogo com o Oscar" → o nome é Oscar; "Fala com João" → o nome é João

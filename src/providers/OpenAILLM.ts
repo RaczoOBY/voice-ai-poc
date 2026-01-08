@@ -41,7 +41,7 @@ export class OpenAILLM implements ILLM {
       const response = await this.client.chat.completions.create({
         model: this.config.llmModel, // 'gpt-4o' ou 'gpt-4o-mini'
         messages: messages as any,
-        max_tokens: options?.maxTokens || 150,
+        max_tokens: options?.maxTokens || 120, // Balanceado: respostas completas mas concisas
         temperature: options?.temperature || 0.7,
         // Otimizações para baixa latência
         stream: false, // Para métricas precisas, não usar stream
@@ -83,7 +83,7 @@ export class OpenAILLM implements ILLM {
       const stream = await this.client.chat.completions.create({
         model: this.config.llmModel,
         messages: messages as any,
-        max_tokens: 150,
+        max_tokens: 120, // Balanceado: respostas completas mas concisas
         temperature: 0.7,
         stream: true,
       });

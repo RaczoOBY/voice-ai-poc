@@ -86,6 +86,14 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
   private pendingReject: ((error: Error) => void) | null = null;
   private transcriptionStartTime: number = 0;
   private firstPartialTime: number = 0; // Timestamp da primeira transcrição parcial (latência real)
+  
+  // Reconexão automática e keepalive
+  private reconnectAttempts: number = 0;
+  private maxReconnectAttempts: number = 5;
+  private reconnectDelayMs: number = 1000;
+  private keepaliveInterval: NodeJS.Timeout | null = null;
+  private keepaliveIntervalMs: number = 15000; // Enviar keepalive a cada 15s
+  private lastAudioSentTime: number = 0;
 
   constructor(config: ElevenLabsScribeConfig) {
     super();
@@ -164,6 +172,11 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
 
       this.ws.on('open', () => {
         this.isConnected = true;
+        // Resetar timers ao conectar/reconectar para evitar métricas incorretas
+        this.transcriptionStartTime = 0;
+        this.firstPartialTime = 0;
+        this.reconnectAttempts = 0; // Reset contador de reconexões
+        this.startKeepalive();
         this.logger.info('✅ Conectado ao ElevenLabs Scribe');
         resolve();
       });
@@ -194,12 +207,18 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
         this.logger.warn(`🔌 Desconectado do Scribe (${code}): ${reason.toString()}`);
         this.isConnected = false;
         this.sessionId = null;
+        this.stopKeepalive();
         
         // Se foi erro de requisição inválida, logar detalhes
         if (code === 1008) {
           this.logger.error(`❌ Erro: Requisição inválida. Verifique os parâmetros da conexão.`);
           this.logger.debug(`URL usada: ${wsUrl}`);
           this.logger.debug(`Parâmetros: ${params.toString()}`);
+        }
+        
+        // Tentar reconectar automaticamente (exceto se foi fechamento normal)
+        if (code !== 1000 && code !== 1005) {
+          this.attemptReconnect(callId);
         }
       });
 
@@ -210,6 +229,81 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
         }
       }, 10000);
     });
+  }
+
+  /**
+   * Tenta reconectar automaticamente após desconexão
+   */
+  private async attemptReconnect(callId: string): Promise<void> {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      this.logger.error(`❌ Máximo de tentativas de reconexão atingido (${this.maxReconnectAttempts})`);
+      this.emit('error', new Error('Falha na reconexão ao Scribe'));
+      return;
+    }
+
+    this.reconnectAttempts++;
+    const delay = this.reconnectDelayMs * Math.pow(2, this.reconnectAttempts - 1); // Exponential backoff
+    
+    this.logger.warn(`🔄 Tentando reconectar em ${delay}ms (tentativa ${this.reconnectAttempts}/${this.maxReconnectAttempts})...`);
+    
+    await new Promise(resolve => setTimeout(resolve, delay));
+    
+    try {
+      // Forçar nova conexão
+      this.isConnected = false;
+      this.ws = null;
+      await this.startStream(callId);
+      this.logger.info(`✅ Reconectado ao Scribe com sucesso (tentativa ${this.reconnectAttempts})`);
+    } catch (error) {
+      this.logger.error(`❌ Falha na reconexão:`, error);
+      // Tentar novamente
+      this.attemptReconnect(callId);
+    }
+  }
+
+  /**
+   * Inicia keepalive para manter a conexão ativa
+   * Envia pacotes vazios periodicamente quando não há áudio
+   */
+  private startKeepalive(): void {
+    this.stopKeepalive(); // Limpar intervalo anterior
+    
+    this.keepaliveInterval = setInterval(() => {
+      // Só envia keepalive se não enviou áudio recentemente
+      const timeSinceLastAudio = Date.now() - this.lastAudioSentTime;
+      
+      if (this.isConnected && this.ws && timeSinceLastAudio > this.keepaliveIntervalMs / 2) {
+        try {
+          // Enviar chunk de áudio silencioso (1 segundo de silêncio a 16kHz)
+          // 16000 samples * 2 bytes = 32000 bytes
+          const silentChunk = Buffer.alloc(3200); // 100ms de silêncio
+          
+          const message = JSON.stringify({
+            message_type: 'input_audio_chunk',
+            audio_base_64: silentChunk.toString('base64'),
+            sample_rate: this.config.sampleRate,
+            commit: false,
+          });
+          
+          this.ws.send(message);
+          this.logger.debug('💓 Keepalive enviado');
+        } catch (error) {
+          this.logger.warn('⚠️ Erro ao enviar keepalive:', error);
+        }
+      }
+    }, this.keepaliveIntervalMs);
+    
+    this.logger.debug(`💓 Keepalive iniciado (${this.keepaliveIntervalMs}ms)`);
+  }
+
+  /**
+   * Para o keepalive
+   */
+  private stopKeepalive(): void {
+    if (this.keepaliveInterval) {
+      clearInterval(this.keepaliveInterval);
+      this.keepaliveInterval = null;
+    }
   }
 
   /**
@@ -337,7 +431,11 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
    */
   feedAudio(callId: string, chunk: Buffer): void {
     if (!this.isConnected || !this.ws) {
-      this.logger.warn('WebSocket não conectado, ignorando chunk');
+      this.logger.warn('WebSocket não conectado, tentando reconectar...');
+      // Tentar reconectar em background
+      this.attemptReconnect(callId).catch(err => {
+        this.logger.error('Falha ao reconectar durante feedAudio:', err);
+      });
       return;
     }
 
@@ -346,6 +444,9 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
       this.transcriptionStartTime = Date.now();
       this.firstPartialTime = 0; // Reset para nova transcrição
     }
+    
+    // Atualizar timestamp para keepalive
+    this.lastAudioSentTime = Date.now();
 
     // Enviar áudio no formato correto da API
     const message = JSON.stringify({
@@ -359,6 +460,11 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
       this.ws.send(message);
     } catch (error) {
       this.logger.error('Erro ao enviar áudio:', error);
+      // Conexão pode ter sido perdida, tentar reconectar
+      this.isConnected = false;
+      this.attemptReconnect(callId).catch(err => {
+        this.logger.error('Falha ao reconectar após erro de envio:', err);
+      });
     }
   }
 
@@ -459,8 +565,9 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
    * Encerra a conexão
    */
   async disconnect(): Promise<void> {
+    this.stopKeepalive();
     if (this.ws) {
-      this.ws.close();
+      this.ws.close(1000, 'Disconnect requested'); // Código 1000 = fechamento normal
       this.ws = null;
     }
     this.isConnected = false;
@@ -471,6 +578,7 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
     this.pendingReject = null;
     this.transcriptionStartTime = 0;
     this.firstPartialTime = 0;
+    this.reconnectAttempts = 0;
     this.logger.info('🔌 Desconectado do Scribe');
   }
 
