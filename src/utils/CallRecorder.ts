@@ -1,19 +1,14 @@
 /**
- * CallRecorder - Grava áudio e transcrições de chamadas com STREAMING
+ * CallRecorder - Grava áudio e transcrições de chamadas
  * 
  * ESTRATÉGIA:
- * 1. Grava usuário e agente em arquivos WAV separados (streaming, sem acumular memória)
- * 2. No final, usa SoX para mixar os dois em um único arquivo
- * 
- * Isso garante:
- * - Streaming (não estoura memória)
- * - Qualidade de áudio (SoX faz mixagem profissional)
- * - Resistência a crashes (arquivos parciais salvos)
+ * 1. Gravar user e agent com SILÊNCIO para preencher gaps (sincronizado!)
+ * 2. Usar ffmpeg para mixar + adicionar fundo.mp3
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { spawn, execSync } from 'child_process';
+import { execSync } from 'child_process';
 import { Logger } from './Logger';
 import { config } from '../config';
 
@@ -40,9 +35,8 @@ interface CallRecordingMetadata {
 }
 
 // Constantes de áudio
-const USER_SAMPLE_RATE = 16000;    // Microfone (Scribe espera 16kHz)
-const AGENT_SAMPLE_RATE = 22050;   // ElevenLabs TTS
-const OUTPUT_SAMPLE_RATE = 16000;  // Saída mixada
+const USER_SAMPLE_RATE = 16000;    // Microfone (16kHz)
+const AGENT_SAMPLE_RATE = 22050;   // ElevenLabs TTS (22050Hz)
 const BYTES_PER_SAMPLE = 2;        // 16-bit PCM
 const WAV_HEADER_SIZE = 44;
 
@@ -55,15 +49,16 @@ export class CallRecorder {
   private recordingPath: string;
   private callFolder: string | null = null;
   
-  // Streaming de áudio - arquivos separados
-  private userWriteStream: fs.WriteStream | null = null;
-  private agentWriteStream: fs.WriteStream | null = null;
-  private userAudioPath: string | null = null;
-  private agentAudioPath: string | null = null;
+  // Streams para gravação
+  private userStream: fs.WriteStream | null = null;
+  private agentStream: fs.WriteStream | null = null;
   private userBytesWritten: number = 0;
   private agentBytesWritten: number = 0;
-  private userChunksWritten: number = 0;
-  private agentChunksWritten: number = 0;
+  
+  // Timestamps para sincronização
+  private recordingStartTime: number = 0;
+  private lastUserTimestamp: number = 0;
+  private lastAgentTimestamp: number = 0;
 
   constructor(callId: string) {
     this.logger = new Logger('CallRecorder');
@@ -71,14 +66,13 @@ export class CallRecorder {
     this.startTime = new Date();
     this.recordingPath = path.resolve(process.cwd(), config.recording?.savePath || './recordings');
     
-    // Criar pasta de gravações se não existir
     if (!fs.existsSync(this.recordingPath)) {
       fs.mkdirSync(this.recordingPath, { recursive: true });
     }
   }
 
   /**
-   * Inicia a gravação - Cria arquivos WAV separados para user e agent
+   * Inicia a gravação
    */
   start(): void {
     if (!config.recording?.enabled) {
@@ -86,50 +80,78 @@ export class CallRecorder {
       return;
     }
 
-    // Criar subpasta para esta chamada
     const timestamp = this.startTime.toISOString().replace(/[:.]/g, '-');
     this.callFolder = path.join(this.recordingPath, `${timestamp}_${this.callId}`);
     fs.mkdirSync(this.callFolder, { recursive: true });
 
-    // Criar arquivo WAV para usuário (16kHz)
-    this.userAudioPath = path.join(this.callFolder, 'user_audio.wav');
-    this.userWriteStream = fs.createWriteStream(this.userAudioPath);
-    this.userWriteStream.write(this.createWavHeader(0, USER_SAMPLE_RATE));
+    const userPath = path.join(this.callFolder, 'user_audio.wav');
+    const agentPath = path.join(this.callFolder, 'agent_audio.wav');
+    
+    this.userStream = fs.createWriteStream(userPath);
+    this.agentStream = fs.createWriteStream(agentPath);
+    
+    // Headers placeholder
+    this.userStream.write(this.createWavHeader(0, USER_SAMPLE_RATE));
+    this.agentStream.write(this.createWavHeader(0, AGENT_SAMPLE_RATE));
+    
     this.userBytesWritten = 0;
-    this.userChunksWritten = 0;
-
-    // Criar arquivo WAV para agente (22050Hz)
-    this.agentAudioPath = path.join(this.callFolder, 'agent_audio.wav');
-    this.agentWriteStream = fs.createWriteStream(this.agentAudioPath);
-    this.agentWriteStream.write(this.createWavHeader(0, AGENT_SAMPLE_RATE));
     this.agentBytesWritten = 0;
-    this.agentChunksWritten = 0;
-
+    this.recordingStartTime = Date.now();
+    this.lastUserTimestamp = 0;
+    this.lastAgentTimestamp = 0;
     this.isRecording = true;
+
     this.logger.info(`🔴 Gravação iniciada: ${this.callId}`);
     this.logger.info(`   📁 Pasta: ${this.callFolder}`);
   }
 
   /**
-   * Adiciona chunk de áudio do usuário (16kHz) - STREAMING direto para arquivo
+   * Adiciona chunk de áudio do usuário (16kHz)
    */
   addUserAudio(chunk: Buffer): void {
-    if (!this.isRecording || !this.userWriteStream) return;
+    if (!this.isRecording || !this.userStream) return;
     
-    this.userWriteStream.write(chunk);
+    const now = Date.now() - this.recordingStartTime;
+    
+    // Preencher gap com silêncio se necessário
+    const gap = now - this.lastUserTimestamp;
+    if (gap > 100 && this.lastUserTimestamp > 0) {
+      const silenceBytes = Math.floor((gap / 1000) * USER_SAMPLE_RATE * BYTES_PER_SAMPLE);
+      if (silenceBytes > 0 && silenceBytes < 1000000) { // Max 1MB de silêncio
+        const silence = Buffer.alloc(silenceBytes, 0);
+        this.userStream.write(silence);
+        this.userBytesWritten += silenceBytes;
+      }
+    }
+    
+    this.userStream.write(chunk);
     this.userBytesWritten += chunk.length;
-    this.userChunksWritten++;
+    this.lastUserTimestamp = now + (chunk.length / BYTES_PER_SAMPLE / USER_SAMPLE_RATE * 1000);
   }
 
   /**
-   * Adiciona chunk de áudio do agente (22050Hz) - STREAMING direto para arquivo
+   * Adiciona chunk de áudio do agente (22050Hz)
+   * COM SILÊNCIO para manter sincronizado
    */
   addAgentAudio(chunk: Buffer): void {
-    if (!this.isRecording || !this.agentWriteStream) return;
+    if (!this.isRecording || !this.agentStream) return;
     
-    this.agentWriteStream.write(chunk);
+    const now = Date.now() - this.recordingStartTime;
+    
+    // Preencher gap com silêncio se necessário
+    const gap = now - this.lastAgentTimestamp;
+    if (gap > 100 && this.lastAgentTimestamp > 0) {
+      const silenceBytes = Math.floor((gap / 1000) * AGENT_SAMPLE_RATE * BYTES_PER_SAMPLE);
+      if (silenceBytes > 0 && silenceBytes < 1000000) { // Max 1MB de silêncio
+        const silence = Buffer.alloc(silenceBytes, 0);
+        this.agentStream.write(silence);
+        this.agentBytesWritten += silenceBytes;
+      }
+    }
+    
+    this.agentStream.write(chunk);
     this.agentBytesWritten += chunk.length;
-    this.agentChunksWritten++;
+    this.lastAgentTimestamp = now + (chunk.length / BYTES_PER_SAMPLE / AGENT_SAMPLE_RATE * 1000);
   }
 
   /**
@@ -147,7 +169,7 @@ export class CallRecorder {
   }
 
   /**
-   * Finaliza a gravação - Atualiza headers, mixa com SoX, salva transcrição
+   * Finaliza a gravação
    */
   async stop(metrics?: CallRecordingMetadata['metrics']): Promise<string | null> {
     this.logger.info('⏹️ Finalizando gravação...');
@@ -161,35 +183,33 @@ export class CallRecorder {
     const endTime = new Date();
     const duration = endTime.getTime() - this.startTime.getTime();
 
+    await this.closeStreams();
+
     this.logger.info(`📊 Estatísticas da gravação:`);
     this.logger.info(`   Duração: ${Math.round(duration / 1000)}s`);
-    this.logger.info(`   Chunks usuário: ${this.userChunksWritten} (${Math.round(this.userBytesWritten / 1024)}KB)`);
-    this.logger.info(`   Chunks agente: ${this.agentChunksWritten} (${Math.round(this.agentBytesWritten / 1024)}KB)`);
-    this.logger.info(`   Entradas de transcrição: ${this.transcript.length}`);
+    this.logger.info(`   Bytes usuário: ${this.userBytesWritten}`);
+    this.logger.info(`   Bytes agente: ${this.agentBytesWritten}`);
 
     const savedFiles: string[] = [];
 
     try {
-      // PRIMEIRO: Finalizar arquivos de áudio separados
-      await this.finalizeAudioFiles();
+      // Atualizar headers WAV
+      await this.updateWavHeader(path.join(this.callFolder, 'user_audio.wav'), this.userBytesWritten, USER_SAMPLE_RATE);
+      await this.updateWavHeader(path.join(this.callFolder, 'agent_audio.wav'), this.agentBytesWritten, AGENT_SAMPLE_RATE);
       
       if (this.userBytesWritten > 0) savedFiles.push('user_audio.wav');
       if (this.agentBytesWritten > 0) savedFiles.push('agent_audio.wav');
 
-      // SEGUNDO: Mixar com SoX (mantém arquivos separados como backup)
-      if (this.userBytesWritten > 0 || this.agentBytesWritten > 0) {
-        const mixedPath = path.join(this.callFolder, 'call_recording.wav');
-        const mixSuccess = await this.mixWithSox(mixedPath, duration);
+      // Mixar com ffmpeg (incluindo fundo.mp3)
+      if (this.userBytesWritten > 0 && this.agentBytesWritten > 0) {
+        const mixSuccess = this.mixWithFFmpeg();
         if (mixSuccess) {
           savedFiles.push('call_recording.wav');
-          this.logger.info(`🎙️ Gravação mixada: call_recording.wav`);
-        } else {
-          this.logger.warn('⚠️ Mixagem falhou, arquivos separados mantidos como backup');
         }
       }
 
-      // TERCEIRO: Salvar transcrição
-      if (config.recording?.saveTranscript) {
+      // Salvar transcrição
+      if (config.recording?.saveTranscript && this.transcript.length > 0) {
         const metadata: CallRecordingMetadata = {
           callId: this.callId,
           startTime: this.startTime.toISOString(),
@@ -200,17 +220,13 @@ export class CallRecorder {
           metrics,
         };
 
-        const transcriptPath = path.join(this.callFolder, 'transcript.json');
-        fs.writeFileSync(transcriptPath, JSON.stringify(metadata, null, 2));
+        fs.writeFileSync(path.join(this.callFolder, 'transcript.json'), JSON.stringify(metadata, null, 2));
         savedFiles.push('transcript.json');
-        this.logger.info(`📝 Transcrição salva: transcript.json`);
 
-        // Também salvar como texto legível
-        const readableTranscript = this.generateReadableTranscript(metadata);
-        const readablePath = path.join(this.callFolder, 'transcript.txt');
-        fs.writeFileSync(readablePath, readableTranscript);
+        fs.writeFileSync(path.join(this.callFolder, 'transcript.txt'), this.generateReadableTranscript(metadata));
         savedFiles.push('transcript.txt');
-        this.logger.info(`📝 Transcrição legível salva: transcript.txt`);
+        
+        this.logger.info(`📝 Transcrição salva`);
       }
 
       this.logger.info(`✅ Gravação completa: ${this.callFolder}`);
@@ -220,148 +236,111 @@ export class CallRecorder {
 
     } catch (error) {
       this.logger.error('❌ Erro ao salvar gravação:', error);
-      if (savedFiles.length > 0) {
-        this.logger.warn(`⚠️ Gravação parcial em: ${this.callFolder}`);
-        return this.callFolder;
-      }
-      return null;
+      return this.callFolder;
     }
   }
 
-  /**
-   * Finaliza os arquivos de áudio - Fecha streams e atualiza headers WAV
-   */
-  private async finalizeAudioFiles(): Promise<void> {
-    const closePromises: Promise<void>[] = [];
-
-    // Fechar stream do usuário
-    if (this.userWriteStream && this.userAudioPath) {
-      closePromises.push(new Promise((resolve, reject) => {
-        this.userWriteStream!.end(() => {
-          try {
-            if (this.userBytesWritten > 0) {
-              const fd = fs.openSync(this.userAudioPath!, 'r+');
-              const header = this.createWavHeader(this.userBytesWritten, USER_SAMPLE_RATE);
-              fs.writeSync(fd, header, 0, WAV_HEADER_SIZE, 0);
-              fs.closeSync(fd);
-            }
-            resolve();
-          } catch (error) {
-            reject(error);
-          }
-        });
-      }));
-    }
-
-    // Fechar stream do agente
-    if (this.agentWriteStream && this.agentAudioPath) {
-      closePromises.push(new Promise((resolve, reject) => {
-        this.agentWriteStream!.end(() => {
-          try {
-            if (this.agentBytesWritten > 0) {
-              const fd = fs.openSync(this.agentAudioPath!, 'r+');
-              const header = this.createWavHeader(this.agentBytesWritten, AGENT_SAMPLE_RATE);
-              fs.writeSync(fd, header, 0, WAV_HEADER_SIZE, 0);
-              fs.closeSync(fd);
-            }
-            resolve();
-          } catch (error) {
-            reject(error);
-          }
-        });
-      }));
-    }
-
-    await Promise.all(closePromises);
-  }
-
-  /**
-   * Mixa os dois áudios usando SoX
-   * SoX faz: resample, sincronização, mixagem profissional
-   */
-  private async mixWithSox(outputPath: string, durationMs: number): Promise<boolean> {
+  private closeStreams(): Promise<void> {
     return new Promise((resolve) => {
-      try {
-        const durationSec = Math.ceil(durationMs / 1000);
-        
-        // Verificar quais arquivos existem e têm conteúdo
-        const hasUser = this.userAudioPath && this.userBytesWritten > 0;
-        const hasAgent = this.agentAudioPath && this.agentBytesWritten > 0;
-
-        if (!hasUser && !hasAgent) {
-          this.logger.warn('⚠️ Nenhum áudio para mixar');
-          resolve(false);
-          return;
-        }
-
-        // Se só tem um, apenas copiar/converter
-        if (!hasUser && hasAgent) {
-          this.logger.info('🔄 Apenas áudio do agente - convertendo...');
-          execSync(`sox "${this.agentAudioPath}" -r ${OUTPUT_SAMPLE_RATE} "${outputPath}"`, { stdio: 'pipe' });
-          resolve(true);
-          return;
-        }
-
-        if (hasUser && !hasAgent) {
-          this.logger.info('🔄 Apenas áudio do usuário - copiando...');
-          fs.copyFileSync(this.userAudioPath!, outputPath);
-          resolve(true);
-          return;
-        }
-
-        // Ambos existem - criar arquivos padronizados e mixar
-        this.logger.info('🔄 Mixando áudios com SoX...');
-
-        const tempDir = this.callFolder!;
-        const userPadded = path.join(tempDir, 'user_padded.wav');
-        const agentPadded = path.join(tempDir, 'agent_padded.wav');
-
-        // Função para limpar arquivos temporários
-        const cleanupTemp = () => {
-          try {
-            if (fs.existsSync(userPadded)) fs.unlinkSync(userPadded);
-            if (fs.existsSync(agentPadded)) fs.unlinkSync(agentPadded);
-          } catch (e) { /* ignore cleanup errors */ }
-        };
-
-        try {
-          // Converter e padronizar usuário (já está em 16kHz, apenas pad)
-          execSync(
-            `sox "${this.userAudioPath}" -r ${OUTPUT_SAMPLE_RATE} "${userPadded}" pad 0 ${durationSec}`,
-            { stdio: 'pipe', timeout: 30000 }  // 30s timeout
-          );
-
-          // Converter agente para 16kHz e pad
-          // Reduzir volume do agente (0.8) para não sobrepor usuário
-          execSync(
-            `sox -v 0.8 "${this.agentAudioPath}" -r ${OUTPUT_SAMPLE_RATE} "${agentPadded}" pad 0 ${durationSec}`,
-            { stdio: 'pipe', timeout: 30000 }
-          );
-
-          // Mixar os dois
-          execSync(
-            `sox -m "${userPadded}" "${agentPadded}" "${outputPath}" trim 0 ${durationSec}`,
-            { stdio: 'pipe', timeout: 30000 }
-          );
-
-          cleanupTemp();
-          this.logger.info(`✅ Mixagem concluída`);
-          resolve(true);
-        } catch (soxError: any) {
-          this.logger.error('❌ Erro no SoX:', soxError.message);
-          cleanupTemp();
-          resolve(false);
-        }
-      } catch (error: any) {
-        this.logger.error('❌ Erro ao mixar:', error.message);
-        resolve(false);
-      }
+      let pending = 0;
+      const checkDone = () => { pending--; if (pending <= 0) resolve(); };
+      
+      if (this.userStream) { pending++; this.userStream.end(checkDone); }
+      if (this.agentStream) { pending++; this.agentStream.end(checkDone); }
+      if (pending === 0) resolve();
     });
   }
 
   /**
-   * Gera transcrição legível em texto
+   * Mixa user + agent + fundo.mp3 usando ffmpeg
    */
+  private mixWithFFmpeg(): boolean {
+    try {
+      const userPath = path.join(this.callFolder!, 'user_audio.wav');
+      const agentPath = path.join(this.callFolder!, 'agent_audio.wav');
+      const outputPath = path.join(this.callFolder!, 'call_recording.wav');
+      const bgMusicPath = path.resolve(process.cwd(), config.backgroundMusic?.filePath ?? 'src/audio/fundo.mp3');
+      const bgVolume = config.backgroundMusic?.volume ?? 0.12;
+
+      // Verificar ffmpeg
+      try {
+        execSync('which ffmpeg', { stdio: 'ignore' });
+      } catch {
+        this.logger.warn('⚠️ ffmpeg não encontrado. Instale com: brew install ffmpeg');
+        return false;
+      }
+
+      this.logger.info('🔄 Mixando áudios com ffmpeg...');
+
+      // Verificar se música de fundo existe
+      const hasBgMusic = config.backgroundMusic?.enabled && fs.existsSync(bgMusicPath);
+
+      let ffmpegCmd: string;
+      
+      if (hasBgMusic) {
+        // Com música de fundo
+        this.logger.info(`🎵 Incluindo música de fundo: ${bgMusicPath}`);
+        ffmpegCmd = `ffmpeg -y \
+          -i "${userPath}" \
+          -i "${agentPath}" \
+          -stream_loop -1 -i "${bgMusicPath}" \
+          -filter_complex "\
+            [0:a]aresample=22050,volume=1.0[user];\
+            [1:a]volume=0.85[agent];\
+            [2:a]volume=${bgVolume}[bg];\
+            [user][agent]amix=inputs=2:duration=longest:dropout_transition=0[voices];\
+            [voices][bg]amix=inputs=2:duration=first:dropout_transition=0[out]\
+          " \
+          -map "[out]" \
+          -ar 22050 \
+          -ac 1 \
+          "${outputPath}" 2>/dev/null`;
+      } else {
+        // Sem música de fundo
+        ffmpegCmd = `ffmpeg -y \
+          -i "${userPath}" \
+          -i "${agentPath}" \
+          -filter_complex "\
+            [0:a]aresample=22050,volume=1.0[user];\
+            [1:a]volume=0.85[agent];\
+            [user][agent]amix=inputs=2:duration=longest:dropout_transition=0[out]\
+          " \
+          -map "[out]" \
+          -ar 22050 \
+          -ac 1 \
+          "${outputPath}" 2>/dev/null`;
+      }
+
+      execSync(ffmpegCmd, { stdio: 'ignore' });
+
+      if (fs.existsSync(outputPath)) {
+        const stats = fs.statSync(outputPath);
+        this.logger.info(`✅ Gravação mixada: call_recording.wav (${Math.round(stats.size / 1024)}KB)`);
+        if (hasBgMusic) {
+          this.logger.info(`   🎵 Com música de fundo`);
+        }
+        return true;
+      }
+
+      return false;
+    } catch (error: any) {
+      this.logger.warn(`⚠️ Erro ao mixar: ${error.message}`);
+      return false;
+    }
+  }
+
+  private updateWavHeader(filePath: string, dataSize: number, sampleRate: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      try {
+        if (!fs.existsSync(filePath) || dataSize === 0) { resolve(); return; }
+        const fd = fs.openSync(filePath, 'r+');
+        fs.writeSync(fd, this.createWavHeader(dataSize, sampleRate), 0, WAV_HEADER_SIZE, 0);
+        fs.closeSync(fd);
+        resolve();
+      } catch (error) { reject(error); }
+    });
+  }
+
   private generateReadableTranscript(metadata: CallRecordingMetadata): string {
     const lines: string[] = [
       '═══════════════════════════════════════════════════════════════',
@@ -399,46 +378,30 @@ export class CallRecorder {
     }
 
     lines.push('═══════════════════════════════════════════════════════════════');
-
     return lines.join('\n');
   }
 
-  /**
-   * Formata timestamp em MM:SS.mmm
-   */
   private formatTimestamp(ms: number): string {
     const minutes = Math.floor(ms / 60000);
     const seconds = Math.floor((ms % 60000) / 1000);
-    const millis = ms % 1000;
-    return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}.${millis.toString().padStart(3, '0')}`;
+    return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
   }
 
-  /**
-   * Cria header WAV
-   */
   private createWavHeader(dataSize: number, sampleRate: number): Buffer {
     const header = Buffer.alloc(WAV_HEADER_SIZE);
-    const channels = 1;
-    const bitsPerSample = 16;
-    const byteRate = sampleRate * channels * (bitsPerSample / 8);
-    const blockAlign = channels * (bitsPerSample / 8);
+    const byteRate = sampleRate * BYTES_PER_SAMPLE;
 
-    // RIFF chunk
     header.write('RIFF', 0);
     header.writeUInt32LE(36 + dataSize, 4);
     header.write('WAVE', 8);
-
-    // fmt sub-chunk
     header.write('fmt ', 12);
-    header.writeUInt32LE(16, 16); // Subchunk1Size (16 for PCM)
-    header.writeUInt16LE(1, 20); // AudioFormat (1 for PCM)
-    header.writeUInt16LE(channels, 22);
+    header.writeUInt32LE(16, 16);
+    header.writeUInt16LE(1, 20);
+    header.writeUInt16LE(1, 22);
     header.writeUInt32LE(sampleRate, 24);
     header.writeUInt32LE(byteRate, 28);
-    header.writeUInt16LE(blockAlign, 32);
-    header.writeUInt16LE(bitsPerSample, 34);
-
-    // data sub-chunk
+    header.writeUInt16LE(BYTES_PER_SAMPLE, 32);
+    header.writeUInt16LE(16, 34);
     header.write('data', 36);
     header.writeUInt32LE(dataSize, 40);
 

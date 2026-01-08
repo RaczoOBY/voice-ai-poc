@@ -188,38 +188,66 @@ async function main(): Promise<void> {
       company: undefined,
     });
 
-    // Handler para CTRL+C
+    // Função para encerrar graciosamente
     let isShuttingDown = false;
-    process.on('SIGINT', async () => {
+    const gracefulShutdown = async (source: string) => {
       if (isShuttingDown) {
         console.log(`\n${COLORS.yellow}⚠️ Aguarde, salvando gravação...${COLORS.reset}`);
-        return; // Evitar múltiplas execuções
+        return;
       }
       isShuttingDown = true;
       
-      console.log(`\n\n${COLORS.yellow}⏹️  Encerrando sessão...${COLORS.reset}`);
-      console.log(`${COLORS.dim}   Aguarde enquanto a gravação é salva...${COLORS.reset}`);
+      console.log(`\n\n${COLORS.cyan}📴 Encerrando ligação (${source})...${COLORS.reset}`);
+      console.log(`${COLORS.dim}   Processando gravação...${COLORS.reset}`);
       
       try {
         const summary = await agent.endSession(callId);
         
         if (summary) {
-          console.log(`\n${COLORS.green}✅ Sessão encerrada com sucesso!${COLORS.reset}`);
+          console.log(`\n${COLORS.green}✅ Ligação encerrada com sucesso!${COLORS.reset}`);
           console.log(`${COLORS.dim}   Duração: ${Math.round(summary.duration / 1000)}s${COLORS.reset}`);
           console.log(`${COLORS.dim}   Turnos: ${summary.turns}${COLORS.reset}`);
+          
+          // Mostrar onde a gravação foi salva
+          console.log(`\n${COLORS.cyan}📁 Gravação salva em:${COLORS.reset}`);
+          console.log(`${COLORS.dim}   ./recordings/${COLORS.reset}`);
         }
       } catch (error) {
-        console.error(`${COLORS.red}❌ Erro ao encerrar sessão:${COLORS.reset}`, error);
+        console.error(`${COLORS.yellow}⚠️ Erro ao encerrar:${COLORS.reset}`, error);
       }
       
-      // Delay maior para garantir que a gravação foi salva
-      console.log(`${COLORS.dim}   Finalizando...${COLORS.reset}`);
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      console.log(`\n${COLORS.green}👋 Até logo!${COLORS.reset}\n`);
       process.exit(0);
+    };
+
+    // Handler para CTRL+C
+    process.on('SIGINT', () => gracefulShutdown('CTRL+C'));
+
+    // Handler para tecla ENTER - encerra a ligação de forma limpa
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on('data', async (key) => {
+      // CTRL+C em raw mode
+      if (key[0] === 3) {
+        await gracefulShutdown('CTRL+C');
+        return;
+      }
+      
+      // ENTER ou 'q' para encerrar
+      if (key[0] === 13 || key[0] === 10 || key.toString().toLowerCase() === 'q') {
+        await gracefulShutdown('ENTER');
+        return;
+      }
+      
+      // ESC também encerra
+      if (key[0] === 27) {
+        await gracefulShutdown('ESC');
+        return;
+      }
     });
 
     // Manter processo rodando
-    printStatus(`${COLORS.green}Ouvindo...${COLORS.reset} (CTRL+C para sair)`);
+    printStatus(`${COLORS.green}Ouvindo...${COLORS.reset} (ENTER ou Q para encerrar)`);
 
   } catch (error) {
     logger.error('❌ Erro fatal:', error);

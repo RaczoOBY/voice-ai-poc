@@ -142,10 +142,13 @@ export class ContextualFillerManager {
     const intentMap: Record<string, keyof typeof config.fillers.contextual> = {
       price: 'price',
       feature: 'features',
+      features: 'features',
       support: 'support',
       how: 'features',
       what: 'generic',
-      when: 'time',
+      when: 'generic',
+      robot: 'robot',
+      volume: 'volume',
       generic: 'generic',
     };
 

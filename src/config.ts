@@ -1,13 +1,15 @@
 /**
- * Configuração centralizada do sistema
+ * Configuração centralizada do sistema - ZapVoice
  * 
  * ARQUITETURA MODULAR:
- * - product: Informações do produto/serviço
- * - persona: Persona do agente de voz
- * - conversation: Fases e regras da conversa
- * - agent: Prompts gerados dinamicamente a partir das configs acima
+ * - product: Informações completas do produto/serviço
+ * - personas: Tipos de clientes e argumentos específicos
+ * - objections: Objeções comuns e respostas
+ * - socialProof: Prova social e cases
+ * - conversation: Fases, perguntas e regras
+ * - agent: Prompts gerados dinamicamente
  * 
- * Para testar um novo produto/abordagem, basta alterar product, persona e conversation.
+ * Princípio Central: "Entender para Atender" — como um médico que precisa do diagnóstico antes de prescrever.
  */
 
 import dotenv from 'dotenv';
@@ -21,88 +23,316 @@ import { ChatCompletionCreateParamsBase } from 'openai/resources/chat/completion
 
 export type ExecutionMode = 'local' | 'telnyx';
 
-// Fase da conversa (configurável)
 interface ConversationPhase {
   id: string;
   name: string;
-  // Condição para ativar esta fase
   condition: 'no_name' | 'has_name' | 'turn_range' | 'keyword';
-  // Configuração da condição
   conditionConfig?: {
     minTurn?: number;
     maxTurn?: number;
     keywords?: string[];
   };
-  // Instrução para o LLM nesta fase
   instruction: string;
 }
 
+interface QualificationQuestion {
+  question: string;
+  followUp: string; // Elogio/empatia após resposta
+}
+
+interface Persona {
+  id: string;
+  name: string;
+  identifiers: string[]; // Palavras-chave para identificar
+  argument: string; // Argumento específico para esta persona
+}
+
+interface Objection {
+  trigger: string[]; // Palavras que ativam esta objeção
+  response: string;
+}
+
+interface Plan {
+  name: string;
+  price: string;
+  numbers: string;
+  highlights: string[];
+  suggestWhen: string;
+}
+
+interface Feature {
+  name: string;
+  description: string;
+  mentionWhen: string;
+}
+
 // ============================================================================
-// CONFIGURAÇÃO DO PRODUTO
+// CONFIGURAÇÃO DO PRODUTO - ZAPVOICE
 // ============================================================================
 
 const product = {
-  // Nome do produto/empresa
   name: 'ZapVoice',
   
-  // Descrição curta (1 frase)
-  shortDescription: 'automação para WhatsApp Business',
+  // Proposta de valor principal
+  tagline: 'Atenda mais clientes no WhatsApp, sem parecer um robô.',
   
-  // Proposta de valor (o que o produto faz)
-  valueProposition: 'ajuda empresas a automatizar o atendimento e vendas pelo WhatsApp',
+  // Descrição curta
+  shortDescription: 'automação humanizada para WhatsApp',
   
-  // Benefícios principais (usar em pitch)
+  // O que o produto faz (foco no RESULTADO, não na ferramenta)
+  valueProposition: 'ajuda você a vender mais, trabalhar menos e encantar seus clientes no WhatsApp',
+  
+  // IMPORTANTE: ZapVoice é o MEIO, não o FIM
+  // O cliente quer: mais vendas, menos trabalho manual, atendimento que encanta
+  
+  // Benefícios principais (o que o cliente realmente quer)
   benefits: [
-    'automatizar o WhatsApp',
-    'aumentar vendas',
-    'melhorar atendimento',
+    'Vender mais sem ficar preso no celular',
+    'Atender 24/7 sem parecer robô',
+    'Automatizar mensagens repetitivas',
+    'Não perder vendas por demora',
+    'Escalar o atendimento',
   ],
   
-  // Exemplos de perguntas de qualificação
-  qualificationQuestions: [
-    'Você já usa alguma ferramenta de automação?',
-    'Qual é o tamanho da sua equipe de vendas?',
-    'Quantos atendimentos vocês fazem por dia?',
-  ],
+  // Diferenciais-chave
+  differentials: {
+    humanization: {
+      title: 'Humanização',
+      description: 'Os áudios não mostram "encaminhado". E antes de enviar, simula digitação — seu cliente vê "digitando..." como se fosse você.',
+    },
+    simplicity: {
+      title: 'Simplicidade',
+      description: 'É uma extensão do navegador. Instala em 2 minutos, sem software extra.',
+    },
+    security: {
+      title: 'Segurança',
+      description: 'Seus dados ficam na sua máquina. A gente não acessa suas conversas.',
+    },
+    freePlan: {
+      title: 'Teste Grátis',
+      description: 'Tem plano gratuito pra sempre. Começa sem pagar nada.',
+    },
+    smartFlows: {
+      title: 'Fluxos Inteligentes',
+      description: 'Funis condicionais que esperam a resposta do cliente. Fluxos que pensam como humano.',
+    },
+  },
   
-  // CTA (Call-to-Action) principal
-  cta: 'agendar uma demonstração gratuita',
+  // Funcionalidades (para referenciar quando cliente perguntar)
+  features: [
+    { name: 'Mensagens Instantâneas', description: 'Textos, áudios, mídias com 1 clique', mentionWhen: 'Cliente reclama de repetição' },
+    { name: 'Funis de Mensagens', description: 'Sequências automáticas programadas', mentionWhen: 'Cliente quer nutrir leads' },
+    { name: 'Gatilhos Automáticos', description: 'Responde baseado em palavras-chave', mentionWhen: 'Cliente perde venda por demora' },
+    { name: 'Fluxos Condicionais', description: 'Espera resposta antes de continuar', mentionWhen: 'Cliente quer parecer humano' },
+    { name: 'Disparo em Massa', description: 'Envia pra múltiplos contatos', mentionWhen: 'Cliente quer fazer campanhas' },
+    { name: 'Agendamento', description: 'Programa mensagens futuras', mentionWhen: 'Cliente esquece follow-up' },
+    { name: 'Áudios Humanizados', description: 'Sem "encaminhado", simula gravação', mentionWhen: 'Cliente tem medo de robô' },
+  ] as Feature[],
   
-  // Restrições de informação
+  // Planos e preços
+  plans: [
+    { name: 'Gratuito', price: 'R$ 0', numbers: '1', highlights: ['20 envios/dia por tipo', '5 funis/dia'], suggestWhen: 'Cliente quer só testar' },
+    { name: 'Básico', price: 'R$ 49,90/mês', numbers: '1+', highlights: ['Áudios/mídias ilimitados', '15 fluxos/dia'], suggestWhen: 'Cliente precisa de mais volume' },
+    { name: 'Pro', price: 'R$ 79,90/mês', numbers: '1+', highlights: ['Tudo ilimitado', 'Etiquetas', 'Zapsaver'], suggestWhen: 'Cliente quer sem limite nenhum' },
+    { name: 'Anual', price: '50% OFF', numbers: '1+', highlights: ['Mesmo do mensal', 'Metade do preço'], suggestWhen: 'Cliente quer economizar' },
+    { name: 'Personalizado', price: 'Sob consulta', numbers: '10+', highlights: ['Grandes operações'], suggestWhen: 'Cliente tem vários números' },
+  ] as Plan[],
+  
+  // Mapeamento de dores → soluções
+  painSolutions: {
+    'responde a mesma coisa': 'Mensagens e áudios prontos resolvem isso',
+    'perde venda por demora': 'Gatilhos automáticos respondem na hora',
+    'parece robô': 'Áudios humanizados + simulação de digitação',
+    'preso no celular': 'Automação 24/7 te libera',
+    'não consegue escalar': 'Funis e fluxos inteligentes',
+  },
+  
+  // CTA principal
+  cta: 'preparar uma demonstração personalizada',
+  
+  // Restrições
   restrictions: [
-    'Nunca invente informações sobre preços específicos',
-    'Diga que precisa verificar ou agendar uma conversa para detalhes de preço',
+    'Nunca invente informações sobre funcionalidades que não existem',
+    'Se não souber algo específico, ofereça demonstração ou envio de material',
+    'Não pressione — seu objetivo é ENTENDER, não VENDER',
   ],
 };
 
 // ============================================================================
-// CONFIGURAÇÃO DA PERSONA
+// PERSONAS DE CLIENTES
+// ============================================================================
+
+const clientPersonas: Persona[] = [
+  {
+    id: 'microempreendedor',
+    name: 'Microempreendedor',
+    identifiers: ['trabalho sozinho', 'faço tudo', 'sou eu mesmo', 'não tenho equipe'],
+    argument: 'Imagina atender com agilidade mesmo quando tá ocupado. A ZapVoice responde por você com mensagens e áudios prontos — seu cliente nem percebe que é automático.',
+  },
+  {
+    id: 'vendedor',
+    name: 'Vendedor',
+    identifiers: ['vendas', 'prospecção', 'leads', 'clientes', 'fechar'],
+    argument: 'Sabe aquele lead que esfria porque você demorou 10 minutos? Com gatilhos automáticos, a ZapVoice responde na hora. Você só entra pra fechar.',
+  },
+  {
+    id: 'infoprodutor',
+    name: 'Infoprodutor',
+    identifiers: ['curso', 'mentoria', 'lançamento', 'infoproduto', 'digital'],
+    argument: 'Na semana de lançamento, o WhatsApp explode, né? A ZapVoice aguenta o volume com funis que convertem enquanto você foca no que importa.',
+  },
+  {
+    id: 'afiliado',
+    name: 'Afiliado',
+    identifiers: ['afiliado', 'produtos de terceiros', 'comissão', 'hotmart', 'monetizze'],
+    argument: 'Scripts que você já usa podem virar mensagens e áudios automáticos. Mais conversões, menos trabalho repetitivo.',
+  },
+  {
+    id: 'negocio_local',
+    name: 'Negócio Local',
+    identifiers: ['clínica', 'escritório', 'consultório', 'loja', 'restaurante', 'salão'],
+    argument: 'Seu cliente manda mensagem às 22h? A ZapVoice responde, qualifica e agenda. Quando você chega de manhã, já tem tudo organizado.',
+  },
+  {
+    id: 'ecommerce',
+    name: 'E-commerce',
+    identifiers: ['loja online', 'e-commerce', 'ecommerce', 'produto físico', 'entrega'],
+    argument: 'Dúvidas sobre estoque, prazo, frete? A ZapVoice responde automaticamente. Menos carrinho abandonado, mais vendas fechadas.',
+  },
+];
+
+// ============================================================================
+// OBJEÇÕES COMUNS E RESPOSTAS
+// ============================================================================
+
+const objections: Objection[] = [
+  {
+    trigger: ['robô', 'automático', 'artificial', 'frio'],
+    response: 'Os áudios não mostram "encaminhado". E a ZapVoice simula digitação antes de enviar — seu cliente vê "digitando..." como se fosse você do outro lado.',
+  },
+  {
+    trigger: ['bloqueado', 'banido', 'WhatsApp bloquear', 'risco'],
+    response: 'A ZapVoice funciona dentro do que o WhatsApp permite. A randomização de mensagens e delays naturais reduzem esse risco.',
+  },
+  {
+    trigger: ['já tentei', 'não gostei', 'outra ferramenta', 'não funcionou'],
+    response: 'Entendo. A maioria é robótica demais. Nosso diferencial é exatamente a humanização — áudios, digitação simulada, fluxos que esperam resposta.',
+  },
+  {
+    trigger: ['difícil', 'complicado', 'não sou técnico', 'não sei usar'],
+    response: 'É uma extensão de navegador. Instala em 2 minutos, tem videoaulas inclusas. Até quem não é técnico usa tranquilo.',
+  },
+  {
+    trigger: ['business', 'whatsapp business'],
+    response: 'Funciona nos dois! WhatsApp comum e Business, ambos pelo WhatsApp Web.',
+  },
+  {
+    trigger: ['instalar', 'programa', 'software', 'baixar'],
+    response: 'Não precisa instalar nada. É só uma extensão do Chrome que se conecta ao WhatsApp Web. Nada além disso.',
+  },
+  {
+    trigger: ['preço', 'quanto custa', 'valor', 'caro'],
+    response: 'Temos plano gratuito pra você testar. O básico é 49,90 e o Pro 79,90 por mês. Mas antes de falar de plano, deixa eu entender sua operação pra te indicar o melhor.',
+  },
+  {
+    trigger: ['não tenho interesse', 'não preciso', 'não quero'],
+    response: 'Sem problema! Agradeço seu tempo. Se mudar de ideia, a ZapVoice vai estar aqui. Tenha um ótimo dia!',
+  },
+];
+
+// ============================================================================
+// PROVA SOCIAL
+// ============================================================================
+
+const socialProof = {
+  numbers: {
+    users: '+100 mil empreendedores já usaram',
+    activeSubscribers: '+10 mil assinantes ativos',
+    dailyMessages: '+1 milhão de mensagens enviadas por dia',
+    countries: 'Presente em +57 países',
+  },
+  testimonial: {
+    quote: 'Se você vende pelo WhatsApp mas ainda não usa a ZapVoice, está deixando dinheiro na mesa.',
+    author: 'Samuel Pereira',
+    role: 'CEO da SDA',
+  },
+  brands: ['SDA (Samuel Pereira)', 'Cosmobeauty', 'Bolo da Madre'],
+};
+
+// ============================================================================
+// PERSONA DO AGENTE
 // ============================================================================
 
 const persona = {
-  // Cargo/função do agente
-  role: 'vendedora',
-  
-  // Nomes possíveis para o agente (será escolhido aleatoriamente pelo LLM)
+  role: 'consultora especializada em automação humanizada de WhatsApp',
   possibleNames: ['Ana', 'Maria', 'Taís', 'Carla', 'Julia'],
   
-  // Tom de voz
-  tone: 'profissional mas amigável',
+  // Tom de voz - como quem liga para um AMIGO
+  tone: 'amigável e energético',
   
-  // Tipo de interação
-  interactionType: 'ligação de prospecção',
+  interactionType: 'ligação de qualificação',
   
-  // Estilo de comunicação
+  // IMPORTANTE: O objetivo NÃO é vender, é ENTENDER
+  objective: 'entender a operação do cliente para propor uma solução personalizada',
+  
   communicationStyle: {
-    maxSentences: 3,           // Máximo de frases por resposta
-    maxWordsPerSentence: 15,   // Máximo de palavras por frase
-    alwaysEndWithQuestion: true, // Sempre terminar com pergunta
+    maxSentences: 3,
+    maxWordsPerSentence: 20,
+    alwaysEndWithQuestion: true,
+    // Usar primeiro nome, nunca "senhor/senhora"
+    useFirstName: true,
+    // Transmitir energia e alegria
+    energy: 'high',
+    // Intercalar elogios nas perguntas
+    interspersePraise: true,
     avoidStartingWith: ['Entendi', 'Certo', 'Então', 'Perfeito', 'Ok'],
   },
 };
 
 // ============================================================================
-// FASES DA CONVERSA (CONFIGURÁVEIS)
+// PERGUNTAS DE QUALIFICAÇÃO COM ELOGIOS
+// ============================================================================
+
+const qualificationQuestions: QualificationQuestion[] = [
+  {
+    question: 'Me conta, qual seu negócio? O que você vende ou oferece?',
+    followUp: 'Legal! Esse mercado tem muito potencial quando o atendimento é bem feito.',
+  },
+  {
+    question: 'Hoje como você atende pelo WhatsApp? Tudo manual ou já usa alguma ferramenta?',
+    followUp: 'Entendi. A gente vê muito isso e sei como é cansativo ficar respondendo a mesma coisa.',
+  },
+  {
+    question: 'Quantas mensagens você recebe por dia, mais ou menos?',
+    followUp: 'Nossa, esse volume já justifica ter uma ajuda automatizada pra não perder venda.',
+  },
+  {
+    question: 'Você trabalha sozinho ou tem equipe atendendo?',
+    followUp: 'Perfeito, isso me ajuda a pensar na melhor estrutura pra você.',
+  },
+  {
+    question: 'Já perdeu venda por demorar pra responder?',
+    followUp: 'Exato, isso é mais comum do que parece. E cada minuto conta.',
+  },
+  {
+    question: 'O que mais te toma tempo hoje no atendimento?',
+    followUp: 'Faz sentido. Essas tarefas repetitivas são exatamente o que a ZapVoice resolve.',
+  },
+];
+
+// Informações a coletar durante a conversa
+const infoToCollect = [
+  'Tipo de negócio (produto/serviço)',
+  'Volume diário de mensagens',
+  'Se atende sozinho ou em equipe',
+  'Se já usa alguma ferramenta de automação',
+  'Principais dores (tempo, perda de vendas, repetição)',
+  'Quantos números de WhatsApp usa',
+  'Se usa WhatsApp comum ou Business',
+];
+
+// ============================================================================
+// FASES DA CONVERSA
 // ============================================================================
 
 const conversationPhases: ConversationPhase[] = [
@@ -110,28 +340,79 @@ const conversationPhases: ConversationPhase[] = [
     id: 'collect_name',
     name: 'Coletar nome',
     condition: 'no_name',
-    instruction: `FASE: Coletar nome do cliente - você acabou de se apresentar e precisa descobrir o nome da pessoa. Pergunte educadamente: "Com quem eu estou falando?" ou "Qual seu nome?".`,
+    instruction: `FASE: Abertura Amigável
+Você acabou de ligar e precisa descobrir o nome. 
+Exemplo: "Oi, tudo bem? Aqui é a [SEU NOME] da ZapVoice! Com quem eu falo?"
+IMPORTANTE: Seja animada, como quem liga pra um amigo.`,
   },
   {
-    id: 'introduction',
-    name: 'Apresentação do produto',
+    id: 'contextualize',
+    name: 'Contextualizar o contato',
     condition: 'turn_range',
-    conditionConfig: { minTurn: 0, maxTurn: 2 },
-    instruction: `FASE: Apresentação do produto - você já sabe o nome do cliente ({prospectName}). Agora apresente brevemente a ${product.name} e o que fazemos (${product.shortDescription}). Seja concisa (2-3 frases).`,
+    conditionConfig: { minTurn: 0, maxTurn: 1 },
+    instruction: `FASE: Contextualização
+Você já sabe o nome ({prospectName}).
+Agora contextualize o contato e quebre objeção antecipada:
+"Vi que você se cadastrou com interesse em melhorar seu atendimento no WhatsApp. Pelo jeito você tá buscando uma forma de atender mais gente sem ficar preso no celular o dia todo, é isso?"
+
+Depois: "Sei que você quer entender como funciona — e vou explicar tudo em detalhes. Só preciso antes entender melhor sua operação, pra te mostrar algo que realmente faça sentido pro seu negócio. Combinado?"`,
   },
   {
     id: 'qualification',
-    name: 'Qualificação',
+    name: 'Qualificação com elogios',
     condition: 'turn_range',
-    conditionConfig: { minTurn: 3, maxTurn: 6 },
-    instruction: `FASE: Qualificação - descubra se o cliente tem interesse, entenda as necessidades dele e responda perguntas. Use perguntas como: ${product.qualificationQuestions.slice(0, 2).join(' ou ')}`,
+    conditionConfig: { minTurn: 2, maxTurn: 6 },
+    instruction: `FASE: Ciclo de Perguntas + Elogios
+Faça perguntas de qualificação INTERCALANDO elogios e empatia.
+NUNCA faça IBGE (metralhadora de perguntas).
+
+Perguntas disponíveis:
+- "Me conta, qual seu negócio?" → "Legal! Esse mercado tem muito potencial."
+- "Como você atende hoje? Manual ou usa ferramenta?" → "Sei como é cansativo."
+- "Quantas mensagens por dia?" → "Esse volume já justifica automação."
+- "Trabalha sozinho ou tem equipe?" → "Isso me ajuda a pensar na melhor estrutura."
+- "Já perdeu venda por demora?" → "Isso é mais comum do que parece."
+- "O que mais te toma tempo?" → "Essas tarefas repetitivas são o que a ZapVoice resolve."
+
+REGRAS DE OURO:
+1. Nunca faça IBGE — intercale elogios
+2. Use "legal", "faz sentido", "isso é muito comum"
+3. Demonstre empatia: "a gente vê muito isso", "sei como é"
+4. Anote mentalmente as dores do cliente`,
+  },
+  {
+    id: 'present_solution',
+    name: 'Apresentar solução personalizada',
+    condition: 'turn_range',
+    conditionConfig: { minTurn: 7, maxTurn: 9 },
+    instruction: `FASE: Conectar dores com soluções
+Com base no que o cliente disse, conecte as DORES dele com as SOLUÇÕES da ZapVoice.
+
+Mapeamento:
+- "Respondo a mesma coisa 100x" → "Mensagens e áudios prontos resolvem isso"
+- "Perco venda por demora" → "Gatilhos automáticos respondem na hora"
+- "Parece robô quando automatizo" → "Áudios humanizados + digitação simulada"
+- "Preso no celular" → "Automação 24/7 te libera"
+- "Não consigo escalar" → "Funis e fluxos inteligentes"
+
+Se identificou a PERSONA do cliente, use o argumento específico:
+- Microempreendedor: "Atender com agilidade mesmo ocupado..."
+- Vendedor: "Lead que esfria por demora..."
+- Infoprodutor: "Lançamento, WhatsApp explode..."
+- Negócio Local: "Cliente manda 22h, ZapVoice responde e agenda..."`,
   },
   {
     id: 'closing',
-    name: 'Fechamento',
+    name: 'Encerramento com próximo passo',
     condition: 'turn_range',
-    conditionConfig: { minTurn: 7 },
-    instruction: `FASE: Fechamento - próximo passo (${product.cta}, enviar material, etc.) ou encerrar educadamente se não houver interesse.`,
+    conditionConfig: { minTurn: 10 },
+    instruction: `FASE: Encerramento
+Agradeça as informações e proponha próximo passo.
+
+Exemplo:
+"{prospectName}, muito obrigado por compartilhar isso comigo. Com essas informações vou preparar uma demonstração personalizada pra você. Posso te ligar amanhã pra mostrar na prática como funcionaria?"
+
+Se não tiver interesse: "Sem problema! Agradeço seu tempo. Se mudar de ideia, a ZapVoice vai estar aqui. Tenha um ótimo dia!"`,
   },
 ];
 
@@ -140,37 +421,46 @@ const conversationPhases: ConversationPhase[] = [
 // ============================================================================
 
 const conversationRules = {
-  // Regras de resposta
+  // Regras de ouro (do prompt)
+  goldenRules: [
+    'Nunca faça IBGE — não metralhie perguntas sem conexão',
+    'Intercale elogios — "legal", "faz sentido", "isso é muito comum"',
+    'Use perguntas abertas — "me conta", "como funciona hoje", "o que mais te toma tempo"',
+    'Demonstre empatia — "a gente vê muito isso", "sei como é cansativo"',
+    'Anote tudo — essas informações constroem sua demonstração vencedora',
+    'Foque na dor — automação é meio, resultado é fim',
+  ],
+  
   responseRules: [
-    `CRÍTICO: Suas respostas devem ter NO MÁXIMO ${persona.communicationStyle.maxSentences} frases curtas. Respostas longas são proibidas.`,
-    `CRÍTICO: SEMPRE termine sua resposta com uma PERGUNTA para manter a conversa fluindo.`,
-    `Seja natural e conversacional, como uma ${persona.role} real fazendo ${persona.interactionType}.`,
-    `Fale de forma MUITO concisa - cada frase deve ter no máximo ${persona.communicationStyle.maxWordsPerSentence} palavras.`,
-    `Use o nome do cliente quando souber.`,
-    `Se não souber o nome ainda, pergunte educadamente.`,
+    `CRÍTICO: Respostas de NO MÁXIMO ${persona.communicationStyle.maxSentences} frases curtas.`,
+    `SEMPRE termine com uma PERGUNTA (exceto no encerramento).`,
+    `Fale como quem liga para um AMIGO que não vê há tempo.`,
+    `Use o PRIMEIRO NOME do cliente (nunca "senhor/senhora").`,
+    `Transmita ENERGIA e ALEGRIA na voz.`,
+    `Seja natural, jamais robótico.`,
   ],
   
-  // Regras de nome
   nameRules: [
-    `Se o cliente mencionar um nome próprio na resposta (mesmo que não seja uma apresentação formal), reconheça e use esse nome.`,
-    `Exemplos: "Seu fogo com o Oscar" → o nome é Oscar; "Fala com João" → o nome é João.`,
-    `SEMPRE use um nome real para você (${persona.possibleNames.join(', ')}) - NUNCA use placeholders como [seu nome] ou [nome].`,
+    `Se o cliente mencionar um nome, use imediatamente.`,
+    `Exemplos: "Fala com o Oscar" → nome é Oscar.`,
+    `SEMPRE use um nome real para você (${persona.possibleNames.join(', ')}).`,
+    `NUNCA use placeholders como [seu nome] ou [nome].`,
   ],
   
-  // Regras de comportamento
   behaviorRules: [
-    `Se não entender algo, peça para repetir educadamente APENAS se realmente não entender.`,
+    `Seu objetivo NÃO é vender — é ENTENDER.`,
+    `Você é um médico fazendo diagnóstico antes de prescrever.`,
     ...product.restrictions,
-    `Se a pessoa não tiver interesse, agradeça e encerre educadamente.`,
-    `NÃO comece suas respostas com palavras como: ${persona.communicationStyle.avoidStartingWith.join(', ')} - vá direto ao ponto.`,
-    `Mantenha o tom ${persona.tone} de uma ${persona.role}.`,
+    `Se não tiver interesse, agradeça educadamente e encerre.`,
+    `NÃO comece com: ${persona.communicationStyle.avoidStartingWith.join(', ')}`,
   ],
   
-  // Exemplos de respostas (para few-shot learning)
+  // Exemplos de boas respostas
   responseExamples: [
-    `"Prazer, Oscar! A ${product.name} ${product.valueProposition}. ${product.qualificationQuestions[0]}"`,
-    `"Ótimo! Nossa solução pode ${product.benefits[1]}. Posso te contar mais sobre como funciona?"`,
-    `"Que bom! Temos planos flexíveis. ${product.qualificationQuestions[1]}"`,
+    '"Legal, {name}! Esse mercado tem muito potencial. E como você atende hoje, tudo manual?"',
+    '"Nossa, esse volume já justifica automação. Você já perdeu venda por demora?"',
+    '"Faz total sentido. Essas tarefas repetitivas são exatamente o que a ZapVoice resolve."',
+    '"Imagina atender com agilidade mesmo quando tá ocupado. Seu cliente nem percebe que é automático."',
   ],
 };
 
@@ -178,17 +468,31 @@ const conversationRules = {
 // GERAÇÃO DINÂMICA DE PROMPTS
 // ============================================================================
 
-/**
- * Gera o system prompt baseado nas configurações
- */
 function generateSystemPrompt(): string {
   const allRules = [
+    ...conversationRules.goldenRules,
     ...conversationRules.responseRules,
     ...conversationRules.nameRules,
     ...conversationRules.behaviorRules,
   ];
 
-  return `Você é uma ${persona.role} da ${product.name} fazendo uma ${persona.interactionType}. Você está ligando para apresentar ${product.shortDescription}.
+  const personaArgs = clientPersonas.map(p => `- ${p.name}: "${p.argument}"`).join('\n');
+  
+  const objectionResponses = objections.slice(0, 5).map(o => 
+    `- Se falar "${o.trigger[0]}": "${o.response}"`
+  ).join('\n');
+
+  return `Você é uma ${persona.role} da ${product.name}. 
+
+IDENTIDADE:
+- Você é uma consultora, não uma vendedora.
+- Seu objetivo NÃO é vender — é ENTENDER a operação do cliente.
+- Princípio: "Entender para Atender" — como um médico que precisa do diagnóstico antes de prescrever.
+
+PROPOSTA DE VALOR:
+"${product.tagline}"
+O cliente não quer ferramenta de automação. Ele quer: vender mais, trabalhar menos, encantar clientes.
+${product.name} é só o MEIO, não o FIM.
 
 FASE ATUAL DA CONVERSA:
 {context}
@@ -197,12 +501,30 @@ NOME DO CLIENTE: {prospectName}
 EMPRESA: {companyName}
 
 FLUXO DA LIGAÇÃO:
-1. PRIMEIRO: Coletar o nome do cliente (se ainda não souber)
-2. SEGUNDO: Se apresentar brevemente como ${persona.role} da ${product.name}
-3. TERCEIRO: Apresentar o produto de forma concisa (máximo 2-3 frases)
-4. DEPOIS: Qualificar interesse, responder perguntas e ${product.cta} se houver interesse
+1. ABERTURA AMIGÁVEL: Cumprimentar e pegar o nome
+2. CONTEXTUALIZAR: "Vi que você se cadastrou..." + quebrar objeção antecipada
+3. QUALIFICAÇÃO: Ciclo de perguntas + elogios (NUNCA faça IBGE)
+4. CONECTAR DORES: Relacionar problemas dele com soluções ZapVoice
+5. ENCERRAMENTO: Agradecer e propor demonstração personalizada
 
-REGRAS IMPORTANTES:
+ARGUMENTOS POR TIPO DE CLIENTE:
+${personaArgs}
+
+OBJEÇÕES COMUNS:
+${objectionResponses}
+
+DIFERENCIAIS PARA MENCIONAR:
+- Humanização: áudios sem "encaminhado", simula digitação
+- Simplicidade: extensão de navegador, 2 minutos pra instalar
+- Segurança: dados ficam na máquina do cliente
+- Gratuito: tem plano free pra sempre
+
+PROVA SOCIAL:
+- ${socialProof.numbers.users}
+- ${socialProof.numbers.activeSubscribers}
+- "${socialProof.testimonial.quote}" — ${socialProof.testimonial.author}
+
+REGRAS:
 ${allRules.map(r => `- ${r}`).join('\n')}
 
 EXEMPLOS DE BOAS RESPOSTAS:
@@ -210,24 +532,31 @@ ${conversationRules.responseExamples.map(e => `  * ${e}`).join('\n')}
 `;
 }
 
-/**
- * Gera o greeting prompt baseado nas configurações
- */
 function generateGreetingPrompt(): string {
-  return `Você é uma ${persona.role} da ${product.name} fazendo uma ${persona.interactionType}.
+  return `Você é uma ${persona.role} da ${product.name}.
 
-FASE ATUAL: Abertura da ligação - você acabou de ligar e precisa:
-1. Se apresentar brevemente como ${persona.role} da ${product.name}
-2. Pedir o nome do cliente de forma educada
+FASE: Abertura Amigável
+
+Você acabou de ligar e precisa:
+1. Cumprimentar de forma animada (como um amigo)
+2. Se apresentar brevemente
+3. Pedir o nome de forma natural
+
+TOM DE VOZ:
+- Fale como quem liga para um AMIGO que não vê há tempo
+- Transmita ENERGIA e ALEGRIA
+- Seja natural, jamais robótica
 
 IMPORTANTE:
-- Seja breve (máximo 2 frases)
-- Não fale do produto ainda, apenas se apresente e peça o nome
-- Use um tom ${persona.tone}
-- SEMPRE use um nome real para você (exemplos: ${persona.possibleNames.slice(0, 3).map(n => `"Sou a ${n} da ${product.name}"`).join(' ou ')})
-- NUNCA use placeholders como [seu nome] ou [nome] - sempre use um nome real
-- Exemplo correto: "Olá, boa tarde! Sou a ${persona.possibleNames[0]} da ${product.name}. Com quem eu estou falando?"
-- Exemplo ERRADO: "Olá, sou a [seu nome] da ${product.name}" - NÃO faça isso!
+- Máximo 2 frases
+- Use um nome real (${persona.possibleNames.slice(0, 3).join(', ')})
+- NUNCA use placeholders como [seu nome]
+
+EXEMPLO CORRETO:
+"Oi, tudo bem? Aqui é a ${persona.possibleNames[0]} da ${product.name}! Com quem eu falo?"
+
+EXEMPLO ERRADO:
+"Olá, sou a [seu nome] da ${product.name}" — NÃO faça isso!
 
 NOME DO CLIENTE: {prospectName}
 EMPRESA: {companyName}`;
@@ -238,26 +567,22 @@ EMPRESA: {companyName}`;
 // ============================================================================
 
 export const config = {
-  // Modo de execução
   mode: (process.env.MODE || 'local') as ExecutionMode,
 
-  // ========== CONFIGURAÇÕES MODULARES (EDITE AQUI PARA NOVOS PRODUTOS) ==========
+  // ========== CONFIGURAÇÕES DE NEGÓCIO ==========
   
-  // Produto/Serviço
   product,
-  
-  // Persona do agente
   persona,
-  
-  // Fases da conversa
+  clientPersonas,
+  objections,
+  socialProof,
+  qualificationQuestions,
+  infoToCollect,
   conversationPhases,
-  
-  // Regras da conversa
   conversationRules,
 
   // ========== CONFIGURAÇÕES TÉCNICAS ==========
 
-  // Telnyx - Telefonia (só necessário se mode === 'telnyx')
   telnyx: {
     apiKey: process.env.TELNYX_API_KEY || '',
     connectionId: process.env.TELNYX_CONNECTION_ID || '',
@@ -265,7 +590,6 @@ export const config = {
     webhookUrl: process.env.WEBHOOK_URL || '',
   },
 
-  // OpenAI - Transcrição + LLM
   openai: {
     apiKey: process.env.OPENAI_API_KEY!,
     transcriptionModel: 'whisper-1',
@@ -273,7 +597,6 @@ export const config = {
     useRealtimeApi: false,
   },
 
-  // STT - Speech-to-Text
   stt: {
     provider: (process.env.STT_PROVIDER || 'elevenlabs') as 'openai' | 'elevenlabs',
     elevenlabs: {
@@ -284,7 +607,6 @@ export const config = {
     },
   },
 
-  // ElevenLabs - TTS
   elevenlabs: {
     apiKey: process.env.ELEVENLABS_API_KEY!,
     voiceId: process.env.ELEVENLABS_VOICE_ID || 'pFZP5JQG7iQjIQuC4Bku',
@@ -295,13 +617,11 @@ export const config = {
     outputFormat: 'pcm_16000',
   },
 
-  // Servidor
   server: {
     port: parseInt(process.env.PORT || '3000'),
     host: process.env.HOST || '0.0.0.0',
   },
 
-  // Agente - Prompts gerados dinamicamente
   agent: {
     systemPrompt: generateSystemPrompt(),
     greetingPrompt: generateGreetingPrompt(),
@@ -309,44 +629,43 @@ export const config = {
     maxCallDurationMs: 5 * 60 * 1000,
   },
 
-  // Fillers
   fillers: {
-    generic: ['Uhum', 'Hmm', 'Ah', 'Tá', 'Aham'],
-    withName: ['Tá, {name}...', 'Hmm, {name}...', '{name}...'],
-    transition: ['Então', 'Bom', 'Olha'],
+    generic: ['Uhum', 'Hmm', 'Ah', 'Tá', 'Aham', 'Legal'],
+    withName: ['Tá, {name}...', 'Hmm, {name}...', '{name}...', 'Legal, {name}...'],
+    transition: ['Olha', 'Bom', 'Então'],
     clarification: ['Hmm', 'Ah'],
+    empathy: ['Faz sentido...', 'Entendo...', 'Sei como é...', 'A gente vê muito isso...'],
     contextual: {
-      price: ['Sobre os valores...', 'Em relação ao preço...', 'Quanto a isso...'],
+      price: ['Sobre os valores...', 'Quanto aos planos...', 'Temos opções...'],
       features: ['É bem simples...', 'Funciona assim...', 'Vou te explicar...'],
-      support: ['Temos uma equipe...', 'Nosso suporte...', 'Sobre atendimento...'],
-      time: ['Quanto ao prazo...', 'Em relação ao tempo...', 'Geralmente leva...'],
-      generic: ['Entendi...', 'Sobre isso...', 'Bom, vou explicar...', 'Deixa eu te contar...'],
+      support: ['Temos suporte...', 'A equipe ajuda...', 'Sobre atendimento...'],
+      robot: ['Sobre parecer robô...', 'Quanto à humanização...'],
+      volume: ['Pra esse volume...', 'Com essa demanda...'],
+      generic: ['Sobre isso...', 'Bom, vou explicar...', 'Deixa eu te contar...'],
     },
-    llmSystemPrompt: 'Você é um assistente que gera fillers conversacionais curtos.',
-    llmUserPromptTemplate: `O usuário começou a falar: "{partialText}"
+    llmSystemPrompt: 'Você gera fillers conversacionais curtos e empáticos.',
+    llmUserPromptTemplate: `O usuário disse: "{partialText}"
 
 Gere uma frase curta (máximo 5 palavras) que:
-1. Demonstre que você entendeu a pergunta
-2. Indique que você vai responder
-3. Seja natural e conversacional
-4. NÃO seja uma resposta completa, apenas uma introdução
+1. Demonstre empatia ou que você entendeu
+2. Seja natural e amigável
+3. NÃO seja resposta completa
 
 Exemplos:
-- Se perguntou sobre preço: "Sobre os valores..."
-- Se perguntou como funciona: "É bem simples..."
-- Se perguntou sobre suporte: "Temos uma equipe..."
+- Pergunta sobre preço: "Sobre os valores..."
+- Reclama de robô: "Faz total sentido..."
+- Pergunta como funciona: "É bem simples..."
+- Volume alto: "Pra esse volume..."
 
-Gere APENAS a frase, sem aspas, sem explicações:`,
+Gere APENAS a frase:`,
   },
 
-  // Música de fundo
   backgroundMusic: {
     enabled: true,
     volume: 0.25,
     filePath: 'src/audio/fundo.mp3',
   },
 
-  // Métricas
   metrics: {
     alertThresholds: {
       stt: 300,
@@ -359,14 +678,12 @@ Gere APENAS a frase, sem aspas, sem explicações:`,
     metricsPath: './metrics',
   },
 
-  // Debug
   debug: {
     logLevel: process.env.LOG_LEVEL || 'debug',
     saveAudioChunks: false,
     audioChunksPath: './debug/audio',
   },
 
-  // Gravação
   recording: {
     enabled: true,
     savePath: './recordings',
@@ -379,7 +696,7 @@ Gere APENAS a frase, sem aspas, sem explicações:`,
 // ============================================================================
 
 /**
- * Determina a fase atual da conversa baseado nas condições configuradas
+ * Determina a fase atual da conversa
  */
 export function getCurrentPhase(turnCount: number, hasName: boolean): ConversationPhase | null {
   for (const phase of config.conversationPhases) {
@@ -398,7 +715,6 @@ export function getCurrentPhase(turnCount: number, hasName: boolean): Conversati
         matches = hasName && turnCount >= minTurn && turnCount <= maxTurn;
         break;
       case 'keyword':
-        // Implementar detecção de keywords se necessário
         break;
     }
 
@@ -407,18 +723,69 @@ export function getCurrentPhase(turnCount: number, hasName: boolean): Conversati
     }
   }
 
-  // Fallback para última fase
   return config.conversationPhases[config.conversationPhases.length - 1];
 }
 
 /**
- * Gera o contexto da fase atual com placeholders substituídos
+ * Gera o contexto da fase atual
  */
 export function generatePhaseContext(turnCount: number, hasName: boolean, prospectName: string): string {
   const phase = getCurrentPhase(turnCount, hasName);
   if (!phase) return '';
 
   return phase.instruction.replace('{prospectName}', prospectName);
+}
+
+/**
+ * Identifica a persona do cliente baseado no texto
+ */
+export function identifyClientPersona(text: string): Persona | null {
+  const lowerText = text.toLowerCase();
+  
+  for (const clientPersona of config.clientPersonas) {
+    for (const identifier of clientPersona.identifiers) {
+      if (lowerText.includes(identifier.toLowerCase())) {
+        return clientPersona;
+      }
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Encontra resposta para objeção
+ */
+export function findObjectionResponse(text: string): string | null {
+  const lowerText = text.toLowerCase();
+  
+  for (const objection of config.objections) {
+    for (const trigger of objection.trigger) {
+      if (lowerText.includes(trigger.toLowerCase())) {
+        return objection.response;
+      }
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Sugere plano baseado na conversa
+ */
+export function suggestPlan(wantsTest: boolean, highVolume: boolean, multipleNumbers: boolean): Plan {
+  if (multipleNumbers) return config.product.plans[4]; // Personalizado
+  if (wantsTest) return config.product.plans[0]; // Gratuito
+  if (highVolume) return config.product.plans[2]; // Pro
+  return config.product.plans[1]; // Básico
+}
+
+/**
+ * Retorna próxima pergunta de qualificação
+ */
+export function getNextQuestion(askedCount: number): QualificationQuestion | null {
+  if (askedCount >= config.qualificationQuestions.length) return null;
+  return config.qualificationQuestions[askedCount];
 }
 
 // Validação

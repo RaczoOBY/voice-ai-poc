@@ -87,6 +87,10 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
   private transcriptionStartTime: number = 0;
   private firstPartialTime: number = 0; // Timestamp da primeira transcrição parcial (latência real)
   
+  // Coordenação com o agente para métricas corretas
+  private _isAgentSpeaking: boolean = false;
+  private chunksWhileAgentSpeaking: number = 0; // Contador de chunks ignorados durante fala do agente
+  
   // Reconexão automática e keepalive
   private reconnectAttempts: number = 0;
   private maxReconnectAttempts: number = 5;
@@ -428,6 +432,9 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
   /**
    * Envia chunk de áudio para o Scribe
    * Formato: PCM 16-bit mono na sample rate configurada
+   * 
+   * IMPORTANTE: Só inicia contagem de latência quando o agente NÃO está falando.
+   * Isso evita métricas incorretas quando o usuário fala durante reprodução do agente.
    */
   feedAudio(callId: string, chunk: Buffer): void {
     if (!this.isConnected || !this.ws) {
@@ -439,10 +446,24 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
       return;
     }
 
-    // Marcar início da transcrição (primeiro chunk enviado)
-    if (this.transcriptionStartTime === 0) {
-      this.transcriptionStartTime = Date.now();
-      this.firstPartialTime = 0; // Reset para nova transcrição
+    // Se o agente está falando, NÃO iniciar contagem de latência
+    // O áudio ainda é enviado para o Scribe (para transcrição), mas
+    // a medição de latência só começa quando o agente para de falar
+    if (this._isAgentSpeaking) {
+      this.chunksWhileAgentSpeaking++;
+      // Não iniciar timer de latência - apenas enviar áudio
+    } else {
+      // Agente não está falando - iniciar contagem de latência
+      // Marcar início da transcrição (primeiro chunk enviado APÓS agente parar de falar)
+      if (this.transcriptionStartTime === 0) {
+        this.transcriptionStartTime = Date.now();
+        this.firstPartialTime = 0; // Reset para nova transcrição
+        
+        if (this.chunksWhileAgentSpeaking > 0) {
+          this.logger.debug(`⏱️ Iniciando contagem de latência (${this.chunksWhileAgentSpeaking} chunks durante fala do agente ignorados)`);
+          this.chunksWhileAgentSpeaking = 0;
+        }
+      }
     }
     
     // Atualizar timestamp para keepalive
@@ -596,5 +617,46 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
     this.logger.info('🔥 Pré-aquecendo conexão Scribe...');
     await this.startStream('warmup');
     this.logger.info('✅ Scribe pronto');
+  }
+
+  /**
+   * Define se o agente está falando
+   * Usado para coordenação de métricas de latência
+   * 
+   * Quando o agente está falando:
+   * - O áudio ainda é enviado para o Scribe (para transcrição)
+   * - MAS a contagem de latência NÃO é iniciada
+   * - Isso evita métricas incorretas de 16000ms+ quando usuário fala durante reprodução
+   */
+  setAgentSpeaking(speaking: boolean): void {
+    const wasAgentSpeaking = this._isAgentSpeaking;
+    this._isAgentSpeaking = speaking;
+    
+    if (wasAgentSpeaking && !speaking) {
+      // Agente parou de falar - resetar timers para nova medição correta
+      this.logger.debug('🔇 Agente parou de falar - timers de latência prontos');
+      // NÃO resetar transcriptionStartTime aqui - deixar o feedAudio fazer isso
+      // quando o próximo chunk chegar (garante timing correto)
+    } else if (!wasAgentSpeaking && speaking) {
+      this.logger.debug('🔊 Agente começou a falar');
+    }
+  }
+
+  /**
+   * Retorna se o agente está falando
+   */
+  get isAgentSpeaking(): boolean {
+    return this._isAgentSpeaking;
+  }
+
+  /**
+   * Reseta os timers de medição de latência
+   * Chamado quando ocorre barge-in para garantir métricas corretas
+   */
+  resetTimingOnBargeIn(): void {
+    this.logger.debug('🔇 Barge-in: resetando timers de latência');
+    this.transcriptionStartTime = 0;
+    this.firstPartialTime = 0;
+    this.chunksWhileAgentSpeaking = 0;
   }
 }

@@ -168,8 +168,10 @@ export class StreamingVoiceAgent extends EventEmitter {
       
       // Callback para chunks de áudio - envia diretamente para o Scribe
       this.config.localProvider.onAudioChunk(callId, (chunk: Buffer) => {
-        // Gravar áudio do usuário
-        if (this.callRecorder) {
+        // IMPORTANTE: Só gravar áudio do usuário quando o agente NÃO está falando
+        // Isso evita gravar o eco do speaker que causa chiado na gravação
+        const isAgentSpeaking = this.config.localProvider.isCurrentlyPlaying();
+        if (this.callRecorder && !isAgentSpeaking) {
           this.callRecorder.addUserAudio(chunk);
         }
         
@@ -249,6 +251,16 @@ export class StreamingVoiceAgent extends EventEmitter {
       }
       
       this.logger.info('🔇 Barge-in detectado - cancelando TODOS os processamentos');
+      
+      // IMPORTANTE: Resetar timers de latência do STT para métricas corretas
+      // Isso evita que o tempo de áudio enviado durante fala do agente seja contado como latência
+      const scribe = this.config.transcriber as any;
+      if (scribe.resetTimingOnBargeIn) {
+        scribe.resetTimingOnBargeIn();
+      }
+      if (scribe.setAgentSpeaking) {
+        scribe.setAgentSpeaking(false); // Agente parou de falar (foi interrompido)
+      }
       
       // Cancelar processamento atual se estiver em andamento
       if (this.isProcessing) {
@@ -731,6 +743,12 @@ export class StreamingVoiceAgent extends EventEmitter {
     this.currentMetrics.interrupted = false;
     this.config.localProvider.resetInterruptState();
     
+    // Notificar STT que agente vai começar a falar (para métricas corretas)
+    const scribe = this.config.transcriber as any;
+    if (scribe.setAgentSpeaking) {
+      scribe.setAgentSpeaking(true);
+    }
+    
     try {
       if (!this.config.tts.synthesizeStream) {
         throw new Error('TTS não suporta streaming');
@@ -764,6 +782,11 @@ export class StreamingVoiceAgent extends EventEmitter {
 
     // Finalizar streaming
     this.config.localProvider.endAudioStream();
+    
+    // Notificar STT que agente parou de falar
+    if (scribe.setAgentSpeaking) {
+      scribe.setAgentSpeaking(false);
+    }
     
     // Adicionar resposta ao histórico
     session.conversationHistory.push({
