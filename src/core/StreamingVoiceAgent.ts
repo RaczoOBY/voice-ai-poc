@@ -30,6 +30,7 @@ import { LocalAudioProvider } from '../providers/LocalAudioProvider';
 import { ContextualFillerManager } from './ContextualFillerManager';
 import { LatencyAnalyzer } from '../utils/LatencyAnalyzer';
 import { CallRecorder } from '../utils/CallRecorder';
+import { AudioRoom } from '../utils/AudioRoom';
 import { config, generatePhaseContext } from '../config';
 
 // Configurações de streaming
@@ -87,6 +88,7 @@ export class StreamingVoiceAgent extends EventEmitter {
 
   // Gravação de chamadas
   private callRecorder: CallRecorder | null = null;
+  private audioRoom: AudioRoom | null = null;
 
   constructor(config: StreamingVoiceAgentConfig) {
     super();
@@ -141,9 +143,16 @@ export class StreamingVoiceAgent extends EventEmitter {
 
     this.activeSessions.set(callId, session);
     
-    // Inicializar gravador de chamadas
+    // Inicializar gravador de chamadas (para transcrições)
     this.callRecorder = new CallRecorder(callId);
     this.callRecorder.start();
+    
+    // Inicializar AudioRoom (para gravação de áudio mixada)
+    const recordingPath = this.callRecorder.getRecordingFolder();
+    if (recordingPath) {
+      this.audioRoom = new AudioRoom();
+      this.audioRoom.start(`${recordingPath}/call_recording.wav`);
+    }
     
     // Configurar modo de VAD baseado no tipo de STT
     if (this.useStreamingSTT) {
@@ -168,11 +177,9 @@ export class StreamingVoiceAgent extends EventEmitter {
       
       // Callback para chunks de áudio - envia diretamente para o Scribe
       this.config.localProvider.onAudioChunk(callId, (chunk: Buffer) => {
-        // IMPORTANTE: Só gravar áudio do usuário quando o agente NÃO está falando
-        // Isso evita gravar o eco do speaker que causa chiado na gravação
-        const isAgentSpeaking = this.config.localProvider.isCurrentlyPlaying();
-        if (this.callRecorder && !isAgentSpeaking) {
-          this.callRecorder.addUserAudio(chunk);
+        // Gravar áudio do usuário no AudioRoom
+        if (this.audioRoom) {
+          this.audioRoom.feedUserAudio(chunk);
         }
         
         if (!this.isGreetingInProgress) {
@@ -765,9 +772,9 @@ export class StreamingVoiceAgent extends EventEmitter {
           isFirstAudio = false;
         }
 
-        // Gravar áudio do agente
-        if (this.callRecorder) {
-          this.callRecorder.addAgentAudio(audioChunk);
+        // Gravar áudio do agente no AudioRoom (mixer em tempo real)
+        if (this.audioRoom) {
+          this.audioRoom.feedAgentAudio(audioChunk);
         }
 
         // Enviar para buffer de streaming (com preenchimento de silêncio se necessário)
@@ -782,6 +789,11 @@ export class StreamingVoiceAgent extends EventEmitter {
 
     // Finalizar streaming
     this.config.localProvider.endAudioStream();
+    
+    // Finalizar segmento de áudio do agente no AudioRoom
+    if (this.audioRoom) {
+      this.audioRoom.endAgentSegment();
+    }
     
     // Notificar STT que agente parou de falar
     if (scribe.setAgentSpeaking) {
@@ -1080,7 +1092,13 @@ export class StreamingVoiceAgent extends EventEmitter {
       transcript: session.conversationHistory,
     };
 
-    // Salvar gravação da chamada
+    // Parar AudioRoom (gravação de áudio mixada)
+    if (this.audioRoom) {
+      await this.audioRoom.stop();
+      this.audioRoom = null;
+    }
+    
+    // Salvar transcrição da chamada
     if (this.callRecorder) {
       const recordingMetrics = {
         averageSTT: session.metrics.averageLatency.stt,

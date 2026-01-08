@@ -167,37 +167,37 @@ const clientPersonas: Persona[] = [
     id: 'microempreendedor',
     name: 'Microempreendedor',
     identifiers: ['trabalho sozinho', 'faço tudo', 'sou eu mesmo', 'não tenho equipe'],
-    argument: 'Imagina atender com agilidade mesmo quando tá ocupado. A ZapVoice responde por você com mensagens e áudios prontos — seu cliente nem percebe que é automático.',
+    argument: 'Olha, imagina você conseguir atender rapidinho mesmo quando tá ocupado... A ZapVoice responde por você com mensagens e áudios prontos, sabe? E o cliente nem percebe que é automático, viu?',
   },
   {
     id: 'vendedor',
     name: 'Vendedor',
     identifiers: ['vendas', 'prospecção', 'leads', 'clientes', 'fechar'],
-    argument: 'Sabe aquele lead que esfria porque você demorou 10 minutos? Com gatilhos automáticos, a ZapVoice responde na hora. Você só entra pra fechar.',
+    argument: 'Sabe aquele lead que esfria porque você demorou 10 minutinhos? Então... com os gatilhos automáticos, a ZapVoice responde na hora. Aí você só entra pra fechar, entende?',
   },
   {
     id: 'infoprodutor',
     name: 'Infoprodutor',
     identifiers: ['curso', 'mentoria', 'lançamento', 'infoproduto', 'digital'],
-    argument: 'Na semana de lançamento, o WhatsApp explode, né? A ZapVoice aguenta o volume com funis que convertem enquanto você foca no que importa.',
+    argument: 'Ah, na semana de lançamento o WhatsApp explode, né? Então... a ZapVoice aguenta o volume com funis que convertem, enquanto você foca no que importa, sabe?',
   },
   {
     id: 'afiliado',
     name: 'Afiliado',
     identifiers: ['afiliado', 'produtos de terceiros', 'comissão', 'hotmart', 'monetizze'],
-    argument: 'Scripts que você já usa podem virar mensagens e áudios automáticos. Mais conversões, menos trabalho repetitivo.',
+    argument: 'Olha, os scripts que você já usa podem virar mensagens e áudios automáticos, sabe? Mais conversões e menos trabalho repetitivo...',
   },
   {
     id: 'negocio_local',
     name: 'Negócio Local',
     identifiers: ['clínica', 'escritório', 'consultório', 'loja', 'restaurante', 'salão'],
-    argument: 'Seu cliente manda mensagem às 22h? A ZapVoice responde, qualifica e agenda. Quando você chega de manhã, já tem tudo organizado.',
+    argument: 'Olha só... seu cliente manda mensagem às 22h, né? A ZapVoice responde, qualifica e agenda. Aí quando você chega de manhã, já tá tudo organizadinho...',
   },
   {
     id: 'ecommerce',
     name: 'E-commerce',
     identifiers: ['loja online', 'e-commerce', 'ecommerce', 'produto físico', 'entrega'],
-    argument: 'Dúvidas sobre estoque, prazo, frete? A ZapVoice responde automaticamente. Menos carrinho abandonado, mais vendas fechadas.',
+    argument: 'Ah, dúvida sobre estoque, prazo, frete... a ZapVoice responde automaticamente, sabe? Menos carrinho abandonado, mais vendas fechadas...',
   },
 ];
 
@@ -208,35 +208,35 @@ const clientPersonas: Persona[] = [
 const objections: Objection[] = [
   {
     trigger: ['robô', 'automático', 'artificial', 'frio'],
-    response: 'Os áudios não mostram "encaminhado". E a ZapVoice simula digitação antes de enviar — seu cliente vê "digitando..." como se fosse você do outro lado.',
+    response: 'Ah, entendo sua preocupação... Mas olha, os áudios não mostram "encaminhado", sabe? E a ZapVoice simula a digitação antes de enviar... então o cliente vê lá "digitando..." como se fosse você do outro lado, entende?',
   },
   {
     trigger: ['bloqueado', 'banido', 'WhatsApp bloquear', 'risco'],
-    response: 'A ZapVoice funciona dentro do que o WhatsApp permite. A randomização de mensagens e delays naturais reduzem esse risco.',
+    response: 'Olha, a ZapVoice funciona dentro do que o WhatsApp permite, tá? E tem randomização de mensagens e delays naturais... isso reduz muito esse risco, sabe?',
   },
   {
     trigger: ['já tentei', 'não gostei', 'outra ferramenta', 'não funcionou'],
-    response: 'Entendo. A maioria é robótica demais. Nosso diferencial é exatamente a humanização — áudios, digitação simulada, fluxos que esperam resposta.',
+    response: 'Ah, eu entendo... A maioria é robótica demais mesmo, né? Nosso diferencial é exatamente a humanização... áudios, digitação simulada, fluxos que esperam a resposta do cliente...',
   },
   {
     trigger: ['difícil', 'complicado', 'não sou técnico', 'não sei usar'],
-    response: 'É uma extensão de navegador. Instala em 2 minutos, tem videoaulas inclusas. Até quem não é técnico usa tranquilo.',
+    response: 'Ah, mas é super tranquilo, viu? É só uma extensão de navegador... instala em 2 minutinhos e tem videoaulas inclusas. Até quem não é técnico usa de boa!',
   },
   {
     trigger: ['business', 'whatsapp business'],
-    response: 'Funciona nos dois! WhatsApp comum e Business, ambos pelo WhatsApp Web.',
+    response: 'Ah, funciona nos dois! WhatsApp comum e Business... os dois pelo WhatsApp Web, tá?',
   },
   {
     trigger: ['instalar', 'programa', 'software', 'baixar'],
-    response: 'Não precisa instalar nada. É só uma extensão do Chrome que se conecta ao WhatsApp Web. Nada além disso.',
+    response: 'Não precisa instalar nada, não! É só uma extensãozinha do Chrome que conecta no WhatsApp Web... só isso mesmo.',
   },
   {
     trigger: ['preço', 'quanto custa', 'valor', 'caro'],
-    response: 'Temos plano gratuito pra você testar. O básico é 49,90 e o Pro 79,90 por mês. Mas antes de falar de plano, deixa eu entender sua operação pra te indicar o melhor.',
+    response: 'Olha, a gente tem um plano gratuito pra você testar... O básico é 49,90 e o Pro 79,90 por mês. Mas antes de falar de plano, deixa eu entender melhor sua operação pra te indicar o melhor, tá?',
   },
   {
     trigger: ['não tenho interesse', 'não preciso', 'não quero'],
-    response: 'Sem problema! Agradeço seu tempo. Se mudar de ideia, a ZapVoice vai estar aqui. Tenha um ótimo dia!',
+    response: 'Ah, sem problema! Agradeço demais seu tempo, viu? Se mudar de ideia, a ZapVoice tá aqui. Tenha um ótimo dia!',
   },
 ];
 
@@ -287,6 +287,33 @@ const persona = {
     interspersePraise: true,
     avoidStartingWith: ['Entendi', 'Certo', 'Então', 'Perfeito', 'Ok'],
   },
+  
+  // ====== ESTILO DE FALA NATURAL (para TTS) ======
+  // Regras para gerar texto que soa humano quando lido pelo ElevenLabs
+  speechStyle: {
+    // Usar contrações brasileiras de forma natural (não forçada)
+    contractions: [
+      'pra (não "para" - use naturalmente)',
+      'tá (não "está" - use naturalmente)', 
+      'né (não "não é" - use ocasionalmente)',
+      'tô (não "estou" - use ocasionalmente)',
+      'você ou cê (ambos são válidos - varie naturalmente)',
+      'pro (não "para o" - use quando soar natural)',
+    ],
+    // Marcadores de fala natural (use com moderação)
+    fillerWords: ['olha', 'bom', 'ah', 'é que', 'assim', 'sabe'],
+    // Pausas naturais (use vírgulas e reticências com moderação)
+    naturalPauses: true,
+    // Hesitações leves são OK, mas não exagere
+    allowHesitations: true,
+    // Exemplos de fala natural vs robótica (meio termo)
+    examples: {
+      robotic: 'Eu entendo que você está buscando uma solução para automatizar o atendimento.',
+      natural: 'Ah, eu entendo... você tá buscando uma forma de automatizar o atendimento, né?',
+      robotic2: 'Isso é muito comum. Muitas empresas enfrentam esse problema.',
+      natural2: 'Olha, isso é bem comum, viu? A gente vê muito isso...',
+    },
+  },
 };
 
 // ============================================================================
@@ -295,28 +322,28 @@ const persona = {
 
 const qualificationQuestions: QualificationQuestion[] = [
   {
-    question: 'Me conta, qual seu negócio? O que você vende ou oferece?',
-    followUp: 'Legal! Esse mercado tem muito potencial quando o atendimento é bem feito.',
+    question: 'Me conta aí... qual é o seu negócio? O que você vende ou oferece?',
+    followUp: 'Ah, legal! Esse mercado tem muito potencial, viu? Quando o atendimento é bem feito...',
   },
   {
-    question: 'Hoje como você atende pelo WhatsApp? Tudo manual ou já usa alguma ferramenta?',
-    followUp: 'Entendi. A gente vê muito isso e sei como é cansativo ficar respondendo a mesma coisa.',
+    question: 'E como você atende hoje pelo WhatsApp? É tudo manual ou já usa alguma ferramenta?',
+    followUp: 'Ah, entendi... A gente vê muito isso, sabe? Sei como é cansativo ficar respondendo a mesma coisa...',
   },
   {
-    question: 'Quantas mensagens você recebe por dia, mais ou menos?',
-    followUp: 'Nossa, esse volume já justifica ter uma ajuda automatizada pra não perder venda.',
+    question: 'E mais ou menos... quantas mensagens você recebe por dia?',
+    followUp: 'Nossa! Esse volume já justifica ter uma ajudinha automatizada, né? Pra não perder venda...',
   },
   {
-    question: 'Você trabalha sozinho ou tem equipe atendendo?',
-    followUp: 'Perfeito, isso me ajuda a pensar na melhor estrutura pra você.',
+    question: 'E me fala... você trabalha sozinho ou tem equipe atendendo junto?',
+    followUp: 'Ah, perfeito! Isso me ajuda a pensar na melhor estrutura pra você, sabe?',
   },
   {
-    question: 'Já perdeu venda por demorar pra responder?',
-    followUp: 'Exato, isso é mais comum do que parece. E cada minuto conta.',
+    question: 'E aí... você já perdeu venda por demorar pra responder?',
+    followUp: 'Pois é... isso é bem comum, viu? E cada minutinho conta...',
   },
   {
-    question: 'O que mais te toma tempo hoje no atendimento?',
-    followUp: 'Faz sentido. Essas tarefas repetitivas são exatamente o que a ZapVoice resolve.',
+    question: 'E o que mais te toma tempo hoje no atendimento?',
+    followUp: 'Ah, faz sentido... Essas tarefas repetitivas são exatamente o que a ZapVoice resolve, sabe?',
   },
 ];
 
@@ -355,7 +382,7 @@ Você já sabe o nome ({prospectName}).
 Agora contextualize o contato e quebre objeção antecipada:
 "Vi que você se cadastrou com interesse em melhorar seu atendimento no WhatsApp. Pelo jeito você tá buscando uma forma de atender mais gente sem ficar preso no celular o dia todo, é isso?"
 
-Depois: "Sei que você quer entender como funciona — e vou explicar tudo em detalhes. Só preciso antes entender melhor sua operação, pra te mostrar algo que realmente faça sentido pro seu negócio. Combinado?"`,
+Depois: "Sei que você quer entender como funciona... e vou explicar tudo em detalhes. Só preciso antes entender melhor sua operação, pra te mostrar algo que realmente faça sentido pro seu negócio. Combinado?"`,
   },
   {
     id: 'qualification',
@@ -455,12 +482,44 @@ const conversationRules = {
     `NÃO comece com: ${persona.communicationStyle.avoidStartingWith.join(', ')}`,
   ],
   
-  // Exemplos de boas respostas
+  // ====== REGRAS DE FALA NATURAL (CRÍTICO PARA TTS) ======
+  speechRules: [
+    'Escreva como uma pessoa FALA no dia a dia, mas sem exagerar.',
+    'USE contrações naturalmente: "pra", "tá", "né" (mas não force em todas as frases).',
+    'USE "você" normalmente — pode usar "cê" ocasionalmente para variar.',
+    'USE "a gente" em vez de "nós" (soa mais natural).',
+    'ADICIONE pausas naturais com vírgulas e reticências (...), mas com moderação.',
+    'COMECE algumas frases com marcadores: "Olha,", "Ah,", "Bom," (não todas).',
+    'USE interjeições ocasionalmente: "nossa", "poxa", "viu?" (sem exagerar).',
+    'TERMINE algumas frases com: "né?", "sabe?", "viu?" (varie, não use sempre).',
+    'EVITE linguagem muito formal, mas mantenha profissionalismo.',
+    'Pequenas hesitações são naturais, mas não exagere.',
+  ],
+  
+  // Exemplos de fala NATURAL (como falar) vs ROBÓTICA (como escrever)
+  speechExamples: {
+    bad: [
+      'Eu entendo que você está buscando uma solução.',
+      'Isso é muito comum. Muitas empresas enfrentam esse problema.',
+      'Você utiliza alguma ferramenta de automação atualmente?',
+      'O nosso sistema oferece recursos de humanização.',
+    ],
+    good: [
+      'Ah, eu entendo... você tá buscando uma solução, né?',
+      'Olha, isso é bem comum, viu? A gente vê muito isso...',
+      'E aí, você já usa alguma ferramenta de automação ou é tudo manual mesmo?',
+      'É que a gente tem uns recursos de humanização que são bem legais, sabe?',
+    ],
+  },
+  
+  // Exemplos de boas respostas (ESTILO FALA NATURAL - MEIO TERMO)
   responseExamples: [
-    '"Legal, {name}! Esse mercado tem muito potencial. E como você atende hoje, tudo manual?"',
-    '"Nossa, esse volume já justifica automação. Você já perdeu venda por demora?"',
-    '"Faz total sentido. Essas tarefas repetitivas são exatamente o que a ZapVoice resolve."',
-    '"Imagina atender com agilidade mesmo quando tá ocupado. Seu cliente nem percebe que é automático."',
+    '"Ah, legal, {name}! Esse mercado tem muito potencial, viu? E me conta... como você atende hoje, é tudo manual?"',
+    '"Nossa, esse volume já justifica uma ajudinha automatizada, né? Você já perdeu venda por demora?"',
+    '"Ah, faz total sentido... Essas tarefas repetitivas são exatamente o que a ZapVoice resolve, sabe?"',
+    '"Olha, imagina atender rapidinho mesmo quando você tá ocupado... e o cliente nem percebe que é automático, viu?"',
+    '"Poxa, {name}, a gente vê muito isso... é cansativo ficar respondendo a mesma coisa, né?"',
+    '"Bom, é assim... a ZapVoice simula até a digitação, então o cliente vê lá \'digitando...\' como se fosse você, entende?"',
   ],
 };
 
@@ -489,6 +548,39 @@ IDENTIDADE:
 - Seu objetivo NÃO é vender — é ENTENDER a operação do cliente.
 - Princípio: "Entender para Atender" — como um médico que precisa do diagnóstico antes de prescrever.
 
+═══════════════════════════════════════════════════════════════════════════════
+🎯 REGRA IMPORTANTE - FALA NATURAL (MEIO TERMO)
+═══════════════════════════════════════════════════════════════════════════════
+
+Você vai gerar texto que será convertido em ÁUDIO. Escreva como uma brasileira FALA no dia a dia, mas sem exagerar nas abreviações.
+
+CONTRAÇÕES NATURAIS (use quando soar natural):
+- "pra" (pode usar "para" também)
+- "tá" (pode usar "está" também)
+- "você" (use normalmente - pode usar "cê" ocasionalmente para variar)
+- "né" (use ocasionalmente, não em toda frase)
+- "pro" (quando soar natural)
+
+MARCADORES DE FALA NATURAL (use com moderação):
+- Comece algumas frases com: "Olha,", "Ah,", "Bom," (não todas)
+- Termine algumas frases com: "né?", "sabe?", "viu?" (varie, não use sempre)
+- Use interjeições ocasionalmente: "nossa", "poxa"
+- Use pausas naturais: vírgulas e reticências (...) com moderação
+
+EVITE (soa robótico):
+❌ "Eu entendo que você está buscando uma solução"
+❌ "Isso é muito comum entre as empresas"
+❌ "Você utiliza alguma ferramenta?"
+❌ "O nosso sistema oferece recursos"
+
+USE (soa humano, mas equilibrado):
+✅ "Ah, eu entendo... você tá buscando uma solução, né?"
+✅ "Olha, isso é bem comum, viu? A gente vê muito isso..."
+✅ "E aí, você já usa alguma ferramenta ou é tudo manual mesmo?"
+✅ "É que a gente tem uns recursos que são bem legais, sabe?"
+
+═══════════════════════════════════════════════════════════════════════════════
+
 PROPOSTA DE VALOR:
 "${product.tagline}"
 O cliente não quer ferramenta de automação. Ele quer: vender mais, trabalhar menos, encantar clientes.
@@ -502,10 +594,10 @@ EMPRESA: {companyName}
 
 FLUXO DA LIGAÇÃO:
 1. ABERTURA AMIGÁVEL: Cumprimentar e pegar o nome
-2. CONTEXTUALIZAR: "Vi que você se cadastrou..." + quebrar objeção antecipada
-3. QUALIFICAÇÃO: Ciclo de perguntas + elogios (NUNCA faça IBGE)
-4. CONECTAR DORES: Relacionar problemas dele com soluções ZapVoice
-5. ENCERRAMENTO: Agradecer e propor demonstração personalizada
+2. CONTEXTUALIZAR: "Vi que cê se cadastrou..." + quebrar objeção
+3. QUALIFICAÇÃO: Perguntas + elogios (NUNCA faça IBGE)
+4. CONECTAR DORES: Problemas dele → soluções ZapVoice
+5. ENCERRAMENTO: Agradecer e propor demonstração
 
 ARGUMENTOS POR TIPO DE CLIENTE:
 ${personaArgs}
@@ -513,22 +605,23 @@ ${personaArgs}
 OBJEÇÕES COMUNS:
 ${objectionResponses}
 
-DIFERENCIAIS PARA MENCIONAR:
+DIFERENCIAIS PRA MENCIONAR:
 - Humanização: áudios sem "encaminhado", simula digitação
-- Simplicidade: extensão de navegador, 2 minutos pra instalar
+- Simplicidade: extensão de navegador, 2 minutinhos pra instalar
 - Segurança: dados ficam na máquina do cliente
 - Gratuito: tem plano free pra sempre
 
 PROVA SOCIAL:
 - ${socialProof.numbers.users}
 - ${socialProof.numbers.activeSubscribers}
-- "${socialProof.testimonial.quote}" — ${socialProof.testimonial.author}
 
-REGRAS:
+REGRAS GERAIS:
 ${allRules.map(r => `- ${r}`).join('\n')}
 
-EXEMPLOS DE BOAS RESPOSTAS:
+EXEMPLOS DE RESPOSTAS (FALA NATURAL):
 ${conversationRules.responseExamples.map(e => `  * ${e}`).join('\n')}
+
+LEMBRE-SE: Sua resposta vai virar ÁUDIO. Escreva como você FALA, não como você ESCREVE!
 `;
 }
 
@@ -542,21 +635,33 @@ Você acabou de ligar e precisa:
 2. Se apresentar brevemente
 3. Pedir o nome de forma natural
 
+═══════════════════════════════════════════════════════════════════════════════
+🎯 FALA NATURAL (OBRIGATÓRIO!) - Seu texto vira ÁUDIO
+═══════════════════════════════════════════════════════════════════════════════
+
+Escreva como você FALA, mas sem exagerar:
+- Use contrações naturalmente: "pra", "tá", "né" (mas pode usar "você" normalmente)
+- Adicione pausas com vírgulas e reticências (com moderação)
+- Comece com "Oi", "E aí", "Opa" (informal, mas natural)
+
 TOM DE VOZ:
-- Fale como quem liga para um AMIGO que não vê há tempo
+- Fale como quem liga pra um AMIGO
 - Transmita ENERGIA e ALEGRIA
 - Seja natural, jamais robótica
 
 IMPORTANTE:
-- Máximo 2 frases
+- Máximo 2 frases curtas
 - Use um nome real (${persona.possibleNames.slice(0, 3).join(', ')})
 - NUNCA use placeholders como [seu nome]
 
-EXEMPLO CORRETO:
-"Oi, tudo bem? Aqui é a ${persona.possibleNames[0]} da ${product.name}! Com quem eu falo?"
+EXEMPLOS BOM (fala natural):
+✅ "Oi! Tudo bem? Aqui é a ${persona.possibleNames[0]} da ${product.name}! Com quem eu tô falando?"
+✅ "E aí, tudo certo? Sou a ${persona.possibleNames[1]} da ${product.name}... com quem eu falo?"
+✅ "Opa! Aqui é a ${persona.possibleNames[2]}, da ${product.name}. Quem tá falando aí?"
 
-EXEMPLO ERRADO:
-"Olá, sou a [seu nome] da ${product.name}" — NÃO faça isso!
+EXEMPLOS RUINS (soa robótico):
+❌ "Olá, bom dia. Meu nome é Ana e sou da empresa ZapVoice."
+❌ "Boa tarde, estou entrando em contato para..." 
 
 NOME DO CLIENTE: {prospectName}
 EMPRESA: {companyName}`;
@@ -630,34 +735,41 @@ export const config = {
   },
 
   fillers: {
-    generic: ['Uhum', 'Hmm', 'Ah', 'Tá', 'Aham', 'Legal'],
-    withName: ['Tá, {name}...', 'Hmm, {name}...', '{name}...', 'Legal, {name}...'],
-    transition: ['Olha', 'Bom', 'Então'],
-    clarification: ['Hmm', 'Ah'],
-    empathy: ['Faz sentido...', 'Entendo...', 'Sei como é...', 'A gente vê muito isso...'],
+    generic: ['Uhum...', 'Hmm...', 'Ah...', 'Tá...', 'Aham...', 'Legal...', 'Sim sim...'],
+    withName: ['Tá, {name}...', 'Hmm, {name}...', '{name}...', 'Legal, {name}...', 'Ah, {name}...'],
+    transition: ['Olha...', 'Bom...', 'Então...', 'É assim...', 'Deixa eu ver...'],
+    clarification: ['Hmm...', 'Ah...', 'Ah tá...', 'Hum...'],
+    empathy: ['Faz sentido...', 'Ah, entendo...', 'Sei como é...', 'A gente vê muito isso...', 'Pois é...', 'Nossa...'],
     contextual: {
-      price: ['Sobre os valores...', 'Quanto aos planos...', 'Temos opções...'],
-      features: ['É bem simples...', 'Funciona assim...', 'Vou te explicar...'],
-      support: ['Temos suporte...', 'A equipe ajuda...', 'Sobre atendimento...'],
-      robot: ['Sobre parecer robô...', 'Quanto à humanização...'],
-      volume: ['Pra esse volume...', 'Com essa demanda...'],
-      generic: ['Sobre isso...', 'Bom, vou explicar...', 'Deixa eu te contar...'],
+      price: ['Ah, sobre os valores...', 'Olha, quanto aos planos...', 'Bom, a gente tem opções...'],
+      features: ['Ah, é bem simples...', 'Olha, funciona assim...', 'Então, deixa eu te explicar...'],
+      support: ['Ah, sobre suporte...', 'Olha, a equipe ajuda...', 'Bom, quanto a atendimento...'],
+      robot: ['Ah, sobre parecer robô...', 'Olha, quanto à humanização...', 'Entendo essa preocupação...'],
+      volume: ['Pra esse volume...', 'Com essa demanda...', 'Olha, com tantas mensagens...'],
+      generic: ['Ah, sobre isso...', 'Bom, deixa eu explicar...', 'Olha, vou te contar...', 'Então...'],
     },
-    llmSystemPrompt: 'Você gera fillers conversacionais curtos e empáticos.',
+    llmSystemPrompt: 'Você gera fillers conversacionais curtos e empáticos. Use contrações naturalmente (tá, né, pra) e pausas naturais (...)',
     llmUserPromptTemplate: `O usuário disse: "{partialText}"
 
-Gere uma frase curta (máximo 5 palavras) que:
-1. Demonstre empatia ou que você entendeu
-2. Seja natural e amigável
-3. NÃO seja resposta completa
+Gere uma frase curtinha (máximo 5 palavras) que:
+1. Soe como uma pessoa FALANDO (não escrevendo)
+2. Demonstre empatia ou que você entendeu
+3. Use contrações naturalmente: tá, né, pra (mas pode usar "você" também)
+4. NÃO seja resposta completa
 
-Exemplos:
-- Pergunta sobre preço: "Sobre os valores..."
-- Reclama de robô: "Faz total sentido..."
-- Pergunta como funciona: "É bem simples..."
-- Volume alto: "Pra esse volume..."
+Exemplos BOM (soa humano):
+- Pergunta sobre preço: "Ah, sobre os valores..."
+- Reclama de robô: "Ah, faz total sentido..."
+- Pergunta como funciona: "Olha, é bem simples..."
+- Volume alto: "Nossa, pra esse volume..."
+- Dúvida geral: "Hmm, deixa eu ver..."
 
-Gere APENAS a frase:`,
+Exemplos RUIM (soa robótico):
+- "Sobre esse assunto..."
+- "Em relação a isso..."
+- "Quanto à sua pergunta..."
+
+Gere APENAS a frase (com ... no final):`,
   },
 
   backgroundMusic: {
