@@ -310,6 +310,13 @@ Saída esperada:
 - [ ] Dashboard de métricas
 - [ ] Integração com CRM
 
+## 💡 Ideias Experimentais
+
+### Speculative LLM Execution
+Conceito para reduzir Time to First Audio: enquanto o usuário ainda fala, usar transcrições parciais do Scribe para iniciar a geração do LLM antecipadamente. Se a transcrição final for similar (>75%), usar a resposta pré-gerada; caso contrário, descartar e gerar normalmente.
+
+**Status**: Testado, porém com problemas de sincronização de áudio (buffer underflow no complemento). Precisa de refinamento na transição entre áudio especulativo e complemento.
+
 ## 📞 Custos Estimados
 
 | Componente | Custo por minuto |
