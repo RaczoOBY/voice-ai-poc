@@ -22,6 +22,7 @@ interface UserSegment {
 interface AgentSegment {
   startTimeMs: number;
   buffer: Buffer;
+  interruptedAtMs?: number;  // Se foi interrompido, quando
 }
 
 export class AudioRoom {
@@ -80,9 +81,10 @@ export class AudioRoom {
       const wav = fs.readFileSync(bgPath);
       const pcm = wav.subarray(WAV_HEADER_SIZE);
       this.bgBuffer = new Int16Array(pcm.buffer, pcm.byteOffset, Math.floor(pcm.length / 2));
-      this.bgVolume = config.backgroundMusic?.volume ?? 0.12;
+      // Volume mais alto para ser audível na gravação
+      this.bgVolume = config.backgroundMusic?.volume ?? 0.15;
       this.bgEnabled = true;
-      this.logger.info(`🎵 Background carregado`);
+      this.logger.info(`🎵 Background carregado (volume: ${this.bgVolume})`);
     } catch (e) {
       this.logger.error('Erro ao carregar background:', e);
     }
@@ -145,6 +147,35 @@ export class AudioRoom {
     // Reset para próximo segmento
     this.currentAgentChunks = [];
     this.currentAgentStartMs = -1;
+  }
+
+  /**
+   * Interrompe o segmento atual do agente (barge-in)
+   * Marca o último segmento finalizado com timestamp de interrupção
+   */
+  interruptAgent(): void {
+    const interruptTimeMs = Date.now() - this.startTime;
+    
+    // Se há chunks pendentes, salvar e marcar como interrompido
+    if (this.currentAgentChunks.length > 0 && this.currentAgentStartMs >= 0) {
+      const buffer = Buffer.concat(this.currentAgentChunks);
+      this.agentSegments.push({
+        startTimeMs: this.currentAgentStartMs,
+        buffer: buffer,
+        interruptedAtMs: interruptTimeMs
+      });
+      this.logger.info(`🔇 Segmento agente PENDENTE interrompido @ ${interruptTimeMs}ms`);
+      this.currentAgentChunks = [];
+      this.currentAgentStartMs = -1;
+    }
+    // Se não há chunks pendentes, marcar o último segmento como interrompido
+    else if (this.agentSegments.length > 0) {
+      const lastSegment = this.agentSegments[this.agentSegments.length - 1];
+      if (!lastSegment.interruptedAtMs) {
+        lastSegment.interruptedAtMs = interruptTimeMs;
+        this.logger.info(`🔇 Último segmento agente marcado como interrompido @ ${interruptTimeMs}ms`);
+      }
+    }
   }
 
   private bufferToSamples(buf: Buffer): number[] {
@@ -233,16 +264,26 @@ export class AudioRoom {
     }
     this.logger.info(`   📈 User: ${userTotal} samples`);
     
-    // 3. Agent - cada segmento no seu timestamp
+    // 3. Agent - cada segmento no seu timestamp (com truncamento se interrompido)
     this.logger.info('   🔊 Adicionando agent...');
     let agentTotal = 0;
     for (const seg of this.agentSegments) {
       const startSample = Math.floor((seg.startTimeMs / 1000) * OUTPUT_SAMPLE_RATE);
-      const numSamples = Math.floor(seg.buffer.length / BYTES_PER_SAMPLE);
+      let numSamples = Math.floor(seg.buffer.length / BYTES_PER_SAMPLE);
+      
+      // Se foi interrompido, calcular quantos samples foram realmente reproduzidos
+      if (seg.interruptedAtMs !== undefined) {
+        const playedMs = seg.interruptedAtMs - seg.startTimeMs;
+        const playedSamples = Math.floor((playedMs / 1000) * OUTPUT_SAMPLE_RATE);
+        if (playedSamples < numSamples) {
+          this.logger.info(`   ✂️ Truncando segmento: ${playedSamples}/${numSamples} samples (interrompido após ${playedMs}ms)`);
+          numSamples = playedSamples;
+        }
+      }
       
       for (let i = 0; i < numSamples; i++) {
         const pos = startSample + i;
-        if (pos >= 0 && pos < totalSamples) {
+        if (pos >= 0 && pos < totalSamples && i * BYTES_PER_SAMPLE < seg.buffer.length) {
           const sample = seg.buffer.readInt16LE(i * BYTES_PER_SAMPLE);
           mixBuffer[pos] += sample;
           agentTotal++;

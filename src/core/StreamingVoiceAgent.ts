@@ -259,6 +259,11 @@ export class StreamingVoiceAgent extends EventEmitter {
       
       this.logger.info('🔇 Barge-in detectado - cancelando TODOS os processamentos');
       
+      // Interromper gravação do agente no AudioRoom (descartar segmento atual)
+      if (this.audioRoom) {
+        this.audioRoom.interruptAgent();
+      }
+      
       // IMPORTANTE: Resetar timers de latência do STT para métricas corretas
       // Isso evita que o tempo de áudio enviado durante fala do agente seja contado como latência
       const scribe = this.config.transcriber as any;
