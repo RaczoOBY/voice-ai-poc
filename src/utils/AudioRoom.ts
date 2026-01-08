@@ -252,6 +252,12 @@ export class AudioRoom {
     // 2. User
     this.logger.info('   🎤 Adicionando user...');
     let userTotal = 0;
+    // Log dos primeiros e últimos segmentos para debug
+    if (this.userSegments.length > 0) {
+      const first = this.userSegments[0];
+      const last = this.userSegments[this.userSegments.length - 1];
+      this.logger.info(`   📍 User: ${this.userSegments.length} segs, primeiro @ ${first.startTimeMs}ms, último @ ${last.startTimeMs}ms`);
+    }
     for (const seg of this.userSegments) {
       const startSample = Math.floor((seg.startTimeMs / 1000) * OUTPUT_SAMPLE_RATE);
       for (let i = 0; i < seg.samples.length; i++) {
@@ -267,24 +273,41 @@ export class AudioRoom {
     // 3. Agent - cada segmento no seu timestamp (com truncamento se interrompido)
     this.logger.info('   🔊 Adicionando agent...');
     let agentTotal = 0;
-    for (const seg of this.agentSegments) {
+    for (let segIdx = 0; segIdx < this.agentSegments.length; segIdx++) {
+      const seg = this.agentSegments[segIdx];
       const startSample = Math.floor((seg.startTimeMs / 1000) * OUTPUT_SAMPLE_RATE);
       let numSamples = Math.floor(seg.buffer.length / BYTES_PER_SAMPLE);
+      const originalSamples = numSamples;
       
       // Se foi interrompido, calcular quantos samples foram realmente reproduzidos
+      let applyFadeOut = false;
       if (seg.interruptedAtMs !== undefined) {
         const playedMs = seg.interruptedAtMs - seg.startTimeMs;
         const playedSamples = Math.floor((playedMs / 1000) * OUTPUT_SAMPLE_RATE);
-        if (playedSamples < numSamples) {
-          this.logger.info(`   ✂️ Truncando segmento: ${playedSamples}/${numSamples} samples (interrompido após ${playedMs}ms)`);
+        if (playedSamples < numSamples && playedSamples > 0) {
           numSamples = playedSamples;
+          applyFadeOut = true;  // Aplicar fade-out para evitar "pop"
+          this.logger.info(`   ✂️ Seg[${segIdx}]: truncado ${numSamples}/${originalSamples} samples (${seg.startTimeMs}ms-${seg.interruptedAtMs}ms)`);
         }
+      } else {
+        this.logger.info(`   📍 Seg[${segIdx}]: ${numSamples} samples @ ${seg.startTimeMs}ms`);
       }
+      
+      // Fade-out nos últimos 50ms para evitar "pop" no corte
+      const fadeOutSamples = applyFadeOut ? Math.min(Math.floor(0.05 * OUTPUT_SAMPLE_RATE), numSamples) : 0;
+      const fadeOutStart = numSamples - fadeOutSamples;
       
       for (let i = 0; i < numSamples; i++) {
         const pos = startSample + i;
         if (pos >= 0 && pos < totalSamples && i * BYTES_PER_SAMPLE < seg.buffer.length) {
-          const sample = seg.buffer.readInt16LE(i * BYTES_PER_SAMPLE);
+          let sample = seg.buffer.readInt16LE(i * BYTES_PER_SAMPLE);
+          
+          // Aplicar fade-out se necessário
+          if (applyFadeOut && i >= fadeOutStart) {
+            const fadeProgress = (i - fadeOutStart) / fadeOutSamples;  // 0 a 1
+            sample = Math.round(sample * (1 - fadeProgress));  // Diminui gradualmente
+          }
+          
           mixBuffer[pos] += sample;
           agentTotal++;
         }
