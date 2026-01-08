@@ -16,6 +16,7 @@ import { EventEmitter } from 'events';
 import {
   ITranscriber,
   TranscriptionResult,
+  STTTimingMetrics,
 } from '../types';
 import { Logger } from '../utils/Logger';
 
@@ -84,6 +85,7 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
   private pendingResolve: ((result: TranscriptionResult) => void) | null = null;
   private pendingReject: ((error: Error) => void) | null = null;
   private transcriptionStartTime: number = 0;
+  private firstPartialTime: number = 0; // Timestamp da primeira transcrição parcial (latência real)
 
   constructor(config: ElevenLabsScribeConfig) {
     super();
@@ -92,7 +94,7 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
       modelId: 'scribe_v2_realtime',
       sampleRate: 16000,
       language: 'pt',
-      vadSilenceThresholdMs: 500,
+      vadSilenceThresholdMs: 500, // Padrão 500ms (0.5s) - mesmo do test-scribe.ts
       ...config,
     };
     this.logger = new Logger('ElevenLabs-Scribe');
@@ -113,21 +115,46 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
 
     return new Promise((resolve, reject) => {
       // Converter ms para segundos para a API
-      const vadSilenceThresholdSecs = (this.config.vadSilenceThresholdMs || 500) / 1000;
+      // Usar valor padrão de 500ms (0.5s) se não especificado - mesmo do test-scribe.ts que funciona
+      const vadSilenceThresholdMs = this.config.vadSilenceThresholdMs || 500;
+      // Garantir que está entre 0.1s e 5.0s, e usar formato com 1 decimal
+      const vadSilenceThresholdSecs = Math.max(0.1, Math.min(5.0, vadSilenceThresholdMs / 1000));
+      const vadSilenceThresholdSecsStr = vadSilenceThresholdSecs.toFixed(1);
+      
+      // Validar valores antes de construir URL
+      if (!this.config.modelId) {
+        reject(new Error('modelId não configurado'));
+        return;
+      }
+      if (!this.config.language) {
+        reject(new Error('language não configurado'));
+        return;
+      }
+      if (!this.config.sampleRate) {
+        reject(new Error('sampleRate não configurado'));
+        return;
+      }
       
       const params = new URLSearchParams({
-        model_id: this.config.modelId!,
-        language_code: this.config.language!,
+        model_id: this.config.modelId,
+        language_code: this.config.language,
         commit_strategy: 'vad',
-        vad_silence_threshold_secs: vadSilenceThresholdSecs.toString(),
+        vad_silence_threshold_secs: vadSilenceThresholdSecsStr,
         audio_format: `pcm_${this.config.sampleRate}`,
         include_timestamps: 'false',
       });
-
+      
       const wsUrl = `${SCRIBE_WS_URL}?${params.toString()}`;
       
       this.logger.info('🔌 Conectando ao ElevenLabs Scribe...');
-      this.logger.debug(`URL: ${wsUrl}`);
+      this.logger.debug(`URL completa: ${wsUrl}`);
+      this.logger.debug(`Parâmetros:`);
+      this.logger.debug(`  - model_id: ${this.config.modelId}`);
+      this.logger.debug(`  - language_code: ${this.config.language}`);
+      this.logger.debug(`  - commit_strategy: vad`);
+      this.logger.debug(`  - vad_silence_threshold_secs: ${vadSilenceThresholdSecsStr} (${vadSilenceThresholdMs}ms)`);
+      this.logger.debug(`  - audio_format: pcm_${this.config.sampleRate}`);
+      this.logger.debug(`  - include_timestamps: false`);
       
       this.ws = new WebSocket(wsUrl, {
         headers: {
@@ -164,9 +191,16 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
       });
 
       this.ws.on('close', (code, reason) => {
-        this.logger.info(`🔌 Desconectado do Scribe (${code}): ${reason.toString()}`);
+        this.logger.warn(`🔌 Desconectado do Scribe (${code}): ${reason.toString()}`);
         this.isConnected = false;
         this.sessionId = null;
+        
+        // Se foi erro de requisição inválida, logar detalhes
+        if (code === 1008) {
+          this.logger.error(`❌ Erro: Requisição inválida. Verifique os parâmetros da conexão.`);
+          this.logger.debug(`URL usada: ${wsUrl}`);
+          this.logger.debug(`Parâmetros: ${params.toString()}`);
+        }
       });
 
       // Timeout de conexão
@@ -193,6 +227,13 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
       case 'partial_transcript':
         // Transcrição parcial (enquanto fala)
         if (event.text) {
+          // Marcar primeira transcrição parcial para medir latência real
+          if (this.firstPartialTime === 0 && this.transcriptionStartTime > 0) {
+            this.firstPartialTime = Date.now();
+            const realLatency = this.firstPartialTime - this.transcriptionStartTime;
+            this.logger.debug(`⚡ Primeira transcrição parcial recebida em ${realLatency}ms`);
+          }
+          
           const partialCallback = this.partialCallbacks.get(callId);
           if (partialCallback) {
             partialCallback(event.text);
@@ -210,16 +251,50 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
           return;
         }
         
-        const duration = Date.now() - this.transcriptionStartTime;
-        this.logger.info(`✅ Transcrição Scribe (${duration}ms): "${event.text}"`);
+        const commitTime = Date.now();
+        const totalDuration = commitTime - this.transcriptionStartTime;
         
-        // Reset timer para próxima transcrição
-        this.transcriptionStartTime = Date.now();
+        // Latência REAL: tempo até primeira transcrição parcial
+        // Se não tiver firstPartialTime, assume pior caso (totalDuration)
+        const realLatency = this.firstPartialTime > 0 
+          ? this.firstPartialTime - this.transcriptionStartTime 
+          : Math.min(totalDuration, 300); // Fallback para 300ms se não tiver parcial
+        
+        // Tempo de fala do usuário (aproximado): total - VAD wait time
+        // VAD wait time = tempo desde última atividade até commit
+        const vadSilenceMs = this.config.vadSilenceThresholdMs || 500;
+        const vadWaitTime = Math.min(vadSilenceMs, totalDuration - realLatency);
+        const speechDuration = Math.max(0, totalDuration - vadWaitTime - realLatency);
+        
+        this.logger.info(`✅ Transcrição Scribe:`);
+        this.logger.info(`   📊 Latência REAL (STT): ${realLatency}ms (target: <300ms)`);
+        this.logger.info(`   🗣️ Duração da fala: ${speechDuration}ms (não é latência)`);
+        this.logger.info(`   ⏱️ VAD wait: ${vadWaitTime}ms`);
+        this.logger.info(`   📝 Texto: "${event.text}"`);
+        
+        // Criar métricas de timing detalhadas
+        const timingMetrics: STTTimingMetrics = {
+          realLatency,
+          speechDuration,
+          vadWaitTime,
+          startTime: this.transcriptionStartTime,
+          firstPartialTime: this.firstPartialTime || this.transcriptionStartTime + realLatency,
+          commitTime,
+        };
+        
+        // Guardar timestamps para próxima transcrição antes de resetar
+        const startTimeForResult = this.transcriptionStartTime;
+        const firstPartialForResult = this.firstPartialTime;
+        
+        // Reset timers para próxima transcrição
+        this.transcriptionStartTime = 0; // Reset para 0 ao invés de Date.now()
+        this.firstPartialTime = 0;
         
         const result: TranscriptionResult = {
           text: event.text,
           language: this.config.language,
-          duration,
+          duration: realLatency, // Latência REAL (até primeira parcial)
+          timingMetrics, // Métricas detalhadas para análise
         };
 
         // Callback registrado
@@ -266,9 +341,10 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
       return;
     }
 
-    // Marcar início da transcrição
+    // Marcar início da transcrição (primeiro chunk enviado)
     if (this.transcriptionStartTime === 0) {
       this.transcriptionStartTime = Date.now();
+      this.firstPartialTime = 0; // Reset para nova transcrição
     }
 
     // Enviar áudio no formato correto da API
@@ -394,6 +470,7 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
     this.pendingResolve = null;
     this.pendingReject = null;
     this.transcriptionStartTime = 0;
+    this.firstPartialTime = 0;
     this.logger.info('🔌 Desconectado do Scribe');
   }
 

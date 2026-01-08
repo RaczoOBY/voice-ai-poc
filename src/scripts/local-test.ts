@@ -176,14 +176,15 @@ async function main(): Promise<void> {
       console.log(`${COLORS.cyan}╚══════════════════════════════════════════════════════════════╝${COLORS.reset}`);
     });
 
-    // Iniciar sessão
-    console.log(`\n${COLORS.green}🎤 Iniciando sessão de voz...${COLORS.reset}`);
-    console.log(`${COLORS.dim}   Fale algo quando o agente terminar de se apresentar.${COLORS.reset}`);
-    console.log(`${COLORS.dim}   Você pode interromper o agente falando por cima (barge-in).${COLORS.reset}\n`);
+    // Iniciar sessão (simulando ligação de vendas - sem dados do prospect inicialmente)
+    console.log(`\n${COLORS.green}📞 Simulando ligação de vendas...${COLORS.reset}`);
+    console.log(`${COLORS.dim}   A vendedora vai se apresentar e pedir seu nome.${COLORS.reset}`);
+    console.log(`${COLORS.dim}   Você pode interromper falando por cima (barge-in).${COLORS.reset}\n`);
 
     const callId = await agent.startLocalSession({
-      name: process.env.PROSPECT_NAME || 'Visitante',
-      company: process.env.PROSPECT_COMPANY || 'Empresa Teste',
+      // Não passar dados inicialmente - a vendedora vai coletar
+      name: undefined,
+      company: undefined,
     });
 
     // Handler para CTRL+C

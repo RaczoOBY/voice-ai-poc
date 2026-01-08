@@ -58,16 +58,20 @@ export interface TurnMetrics {
 }
 
 export interface LatencyBreakdown {
-  /** Tempo do fim do áudio do usuário até transcrição completa */
+  /** Latência REAL do STT: tempo do primeiro chunk até primeira transcrição parcial (~100-300ms) */
   stt: number;
   /** Tempo da transcrição até resposta do LLM */
   llm: number;
   /** Tempo da resposta do LLM até primeiro byte de áudio */
   tts: number;
-  /** Tempo total voice-to-voice */
+  /** Tempo total voice-to-voice (desde fim da fala do usuário) */
   total: number;
   /** Tempo até primeiro áudio (pode ser filler) */
   timeToFirstAudio: number;
+  /** Duração da fala do usuário (NÃO é latência, apenas informativo) */
+  speechDuration?: number;
+  /** Tempo de espera do VAD após silêncio detectado */
+  vadDelay?: number;
 }
 
 export interface MetricEvent {
@@ -114,8 +118,27 @@ export interface TranscriptionResult {
   text: string;
   confidence?: number;
   language?: string;
+  /** Latência REAL do STT: tempo até primeira transcrição parcial */
   duration: number;
   segments?: TranscriptionSegment[];
+  /** Métricas detalhadas de timing do STT */
+  timingMetrics?: STTTimingMetrics;
+}
+
+/** Métricas detalhadas de timing do Speech-to-Text */
+export interface STTTimingMetrics {
+  /** Latência real: tempo do primeiro chunk até primeira transcrição parcial (~100-300ms) */
+  realLatency: number;
+  /** Tempo total de fala do usuário (NÃO é latência) */
+  speechDuration: number;
+  /** Tempo de espera do VAD após silêncio detectado */
+  vadWaitTime: number;
+  /** Timestamp do início (primeiro chunk enviado) */
+  startTime: number;
+  /** Timestamp da primeira transcrição parcial */
+  firstPartialTime: number;
+  /** Timestamp do commit final */
+  commitTime: number;
 }
 
 export interface TranscriptionSegment {

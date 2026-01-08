@@ -5,9 +5,6 @@
  * - Síntese batch
  * - Streaming para menor latência
  * - Múltiplas vozes e modelos
- * 
- * Nota: Usa fetch direto ao invés da biblioteca elevenlabs
- * devido a bugs de autenticação na biblioteca npm.
  */
 
 import { ElevenLabsClient } from '@elevenlabs/elevenlabs-js';
@@ -17,8 +14,6 @@ import {
   TTSResult,
 } from '../types';
 import { Logger } from '../utils/Logger';
-
-const ELEVENLABS_API_BASE = 'https://api.elevenlabs.io/v1';
 
 export class ElevenLabsTTS implements ITTS {
   private client: ElevenLabsClient;
@@ -34,44 +29,41 @@ export class ElevenLabsTTS implements ITTS {
   }
 
   /**
-   * Sintetiza texto em áudio usando fetch direto
-   * Retorna PCM 16-bit 16kHz mono para compatibilidade com speaker
+   * Sintetiza texto em áudio usando o cliente oficial do ElevenLabs
+   * Retorna PCM 16-bit 22050Hz mono para compatibilidade com speaker
    */
   async synthesize(text: string): Promise<TTSResult> {
     const startTime = Date.now();
     this.logger.debug(`🔊 Sintetizando: "${text.substring(0, 50)}..."`);
 
     try {
-      // Usar output_format=pcm_22050 para obter PCM raw compatível com speaker
-      const response = await fetch(
-        `${ELEVENLABS_API_BASE}/text-to-speech/${this.config.voiceId}?output_format=pcm_22050`,
+      const stream = await this.client.textToSpeech.convert(
+        this.config.voiceId,
         {
-          method: 'POST',
-          headers: {
-            'Accept': 'audio/pcm',
-            'Content-Type': 'application/json',
-            'xi-api-key': this.config.apiKey,
+          text,
+          modelId: this.config.model,
+          outputFormat: 'pcm_22050',
+          voiceSettings: {
+            stability: this.config.stability,
+            similarityBoost: this.config.similarityBoost,
+            style: this.config.style,
+            useSpeakerBoost: true,
           },
-          body: JSON.stringify({
-            text,
-            model_id: this.config.model,
-            voice_settings: {
-              stability: this.config.stability,
-              similarity_boost: this.config.similarityBoost,
-              style: this.config.style,
-              use_speaker_boost: true,
-            },
-          }),
         }
       );
 
-      if (!response.ok) {
-        const errorBody = await response.text();
-        throw new Error(`ElevenLabs API error ${response.status}: ${errorBody}`);
+      // Converter ReadableStream para Buffer
+      const chunks: Uint8Array[] = [];
+      const reader = stream.getReader();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
       }
 
-      const arrayBuffer = await response.arrayBuffer();
-      const audioBuffer = Buffer.from(arrayBuffer);
+      // Concatenar todos os chunks em um único Buffer
+      const audioBuffer = Buffer.concat(chunks.map(chunk => Buffer.from(chunk)));
       const duration = Date.now() - startTime;
 
       // PCM 22050Hz mono 16-bit = 44100 bytes/segundo
@@ -102,36 +94,34 @@ export class ElevenLabsTTS implements ITTS {
     this.logger.debug(`🎵 Sintetizando filler: "${text}"`);
 
     try {
-      const response = await fetch(
-        `${ELEVENLABS_API_BASE}/text-to-speech/${this.config.voiceId}?output_format=pcm_22050`,
+      const stream = await this.client.textToSpeech.convert(
+        this.config.voiceId,
         {
-          method: 'POST',
-          headers: {
-            'Accept': 'audio/pcm',
-            'Content-Type': 'application/json',
-            'xi-api-key': this.config.apiKey,
+          text,
+          modelId: this.config.model,
+          outputFormat: 'pcm_22050',
+          voiceSettings: {
+            // Configurações otimizadas para fillers naturais e curtos
+            stability: 0.2,           // Muito baixo = mais natural e variado
+            similarityBoost: 0.3,    // Muito baixo = menos artificial
+            style: 0.0,               // Neutro
+            useSpeakerBoost: false,   // Desligado para sons mais suaves
           },
-          body: JSON.stringify({
-            text,
-            model_id: this.config.model,
-            voice_settings: {
-              // Configurações otimizadas para fillers naturais
-              stability: 0.3,           // Menor = mais variação natural
-              similarity_boost: 0.5,    // Menor = menos artificial/perfeito
-              style: 0.0,               // Neutro
-              use_speaker_boost: false, // Desligado para sons mais suaves
-            },
-          }),
         }
       );
 
-      if (!response.ok) {
-        const errorBody = await response.text();
-        throw new Error(`ElevenLabs API error ${response.status}: ${errorBody}`);
+      // Converter ReadableStream para Buffer
+      const chunks: Uint8Array[] = [];
+      const reader = stream.getReader();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
       }
 
-      const arrayBuffer = await response.arrayBuffer();
-      const audioBuffer = Buffer.from(arrayBuffer);
+      // Concatenar todos os chunks em um único Buffer
+      const audioBuffer = Buffer.concat(chunks.map(chunk => Buffer.from(chunk)));
       const duration = Date.now() - startTime;
 
       // PCM 22050Hz mono 16-bit = 44100 bytes/segundo
@@ -152,47 +142,30 @@ export class ElevenLabsTTS implements ITTS {
   }
 
   /**
-   * Sintetiza com streaming usando fetch direto
-   * Retorna PCM 16-bit 16kHz mono para compatibilidade com speaker
+   * Sintetiza com streaming usando o cliente oficial do ElevenLabs
+   * Retorna PCM 16-bit 22050Hz mono para compatibilidade com speaker
    */
   async synthesizeStream(text: string, onChunk: (chunk: Buffer) => void): Promise<void> {
     const startTime = Date.now();
     this.logger.debug(`🔊 Sintetizando com stream: "${text.substring(0, 50)}..."`);
 
     try {
-      // Usar output_format=pcm_22050 para obter PCM raw compatível com speaker
-      const response = await fetch(
-        `${ELEVENLABS_API_BASE}/text-to-speech/${this.config.voiceId}/stream?output_format=pcm_22050`,
+      const stream = await this.client.textToSpeech.stream(
+        this.config.voiceId,
         {
-          method: 'POST',
-          headers: {
-            'Accept': 'audio/pcm',
-            'Content-Type': 'application/json',
-            'xi-api-key': this.config.apiKey,
+          text,
+          modelId: this.config.model,
+          outputFormat: 'pcm_22050',
+          voiceSettings: {
+            stability: this.config.stability,
+            similarityBoost: this.config.similarityBoost,
+            style: this.config.style,
+            useSpeakerBoost: true,
           },
-          body: JSON.stringify({
-            text,
-            model_id: this.config.model,
-            voice_settings: {
-              stability: this.config.stability,
-              similarity_boost: this.config.similarityBoost,
-              style: this.config.style,
-              use_speaker_boost: true,
-            },
-          }),
         }
       );
 
-      if (!response.ok) {
-        const errorBody = await response.text();
-        throw new Error(`ElevenLabs API error ${response.status}: ${errorBody}`);
-      }
-
-      if (!response.body) {
-        throw new Error('Response body is null');
-      }
-
-      const reader = response.body.getReader();
+      const reader = stream.getReader();
       let firstChunkReceived = false;
       let totalBytes = 0;
 

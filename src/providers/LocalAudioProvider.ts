@@ -107,6 +107,7 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
   
   // Proteção contra feedback de áudio
   private lastPlaybackEndTime: number = 0;
+  private static readonly PLAYBACK_COOLDOWN_MS = 300; // Esperar 300ms após parar de tocar antes de ouvir
   
   // Lock para evitar inicialização múltipla simultânea
   private speakerInitPromise: Promise<void> | null = null;
@@ -243,29 +244,55 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
     
     // MODO EXTERNO (Scribe): Envia chunks diretamente, VAD é feito pelo Scribe
     if (this.vadMode === 'external') {
-      // Enviar chunk para o Scribe em tempo real
+      // PROTEÇÃO CONTRA FEEDBACK: Não enviar áudio para o Scribe enquanto está reproduzindo
+      // ou logo após parar (evita transcrever o próprio áudio do agente)
+      const timeSincePlayback = now - this.lastPlaybackEndTime;
+      
+      if (this.isPlaying) {
+        // Enquanto está reproduzindo, apenas verificar barge-in, mas NÃO enviar para Scribe
+        const bargeInThreshold = VAD_CONFIG.ENERGY_THRESHOLD * VAD_CONFIG.BARGE_IN_ENERGY_MULTIPLIER;
+        if (energy > bargeInThreshold) {
+          this.consecutiveSpeechFrames++;
+          if (!this.bargeInTriggered && 
+              this.consecutiveSpeechFrames >= VAD_CONFIG.BARGE_IN_CONFIRM_FRAMES) {
+            this.logger.info(`🔇 Barge-in confirmado!`);
+            this.stopPlayback();
+            this.playbackInterrupted = true;
+            this.bargeInTriggered = true;
+            this.emit('playback:interrupted', callId);
+            // Após barge-in, resetar cooldown para começar a escutar imediatamente
+            this.lastPlaybackEndTime = Date.now() - LocalAudioProvider.PLAYBACK_COOLDOWN_MS;
+          }
+        } else {
+          this.consecutiveSpeechFrames = 0;
+          this.bargeInTriggered = false;
+        }
+        return; // Não enviar para Scribe enquanto está reproduzindo
+      }
+      
+      // Se acabou de parar de reproduzir, esperar cooldown antes de enviar para Scribe
+      // (exceto se foi barge-in, que já resetou o cooldown)
+      if (timeSincePlayback < LocalAudioProvider.PLAYBACK_COOLDOWN_MS) {
+        return; // Ainda em cooldown, não enviar
+      }
+      
+      // Agora sim, enviar chunk para o Scribe em tempo real
       const chunkCallback = this.audioChunkCallbacks.get(callId);
       if (chunkCallback) {
         chunkCallback(chunk);
+      } else {
+        // Log apenas em debug para não poluir logs, mas importante para diagnóstico
+        if (this.logger) {
+          this.logger.debug(`⚠️ Nenhum callback registrado para callId: ${callId}`);
+        }
       }
       
-      // Manter lógica de barge-in mesmo no modo externo
-      const bargeInThreshold = VAD_CONFIG.ENERGY_THRESHOLD * VAD_CONFIG.BARGE_IN_ENERGY_MULTIPLIER;
-      if (energy > bargeInThreshold) {
-        this.consecutiveSpeechFrames++;
-        if (this.isPlaying && 
-            !this.bargeInTriggered && 
-            this.consecutiveSpeechFrames >= VAD_CONFIG.BARGE_IN_CONFIRM_FRAMES) {
-          this.logger.info(`🔇 Barge-in confirmado!`);
-          this.stopPlayback();
-          this.playbackInterrupted = true;
-          this.bargeInTriggered = true;
-          this.emit('playback:interrupted', callId);
-        }
-      } else {
-        this.consecutiveSpeechFrames = 0;
+      // Resetar flag de barge-in quando não há mais reprodução
+      if (this.bargeInTriggered && !this.isPlaying) {
         this.bargeInTriggered = false;
+        this.consecutiveSpeechFrames = 0;
       }
+      
       return;
     }
     
@@ -438,12 +465,14 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
 
       this.currentSpeaker.on('close', () => {
         this.isPlaying = false;
+        this.lastPlaybackEndTime = Date.now();
         this.currentSpeaker = null;
         resolve();
       });
 
       this.currentSpeaker.on('error', (error: Error) => {
         this.isPlaying = false;
+        this.lastPlaybackEndTime = Date.now();
         this.currentSpeaker = null;
         reject(error);
       });
@@ -519,6 +548,7 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
 
     this.currentSpeaker.on('close', () => {
       this.isPlaying = false;
+      this.lastPlaybackEndTime = Date.now();
       this.currentSpeaker = null;
       this.clearStreamState();
     });
@@ -526,6 +556,7 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
     this.currentSpeaker.on('error', (error: Error) => {
       this.logger.error('Erro no speaker:', error);
       this.isPlaying = false;
+      this.lastPlaybackEndTime = Date.now();
       this.currentSpeaker = null;
       this.clearStreamState();
     });
@@ -625,6 +656,11 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
     // Finalizar speaker
     if (this.currentSpeaker && this.isPlaying) {
       this.currentSpeaker.end();
+      // lastPlaybackEndTime será atualizado no evento 'close' do speaker
+    } else if (this.isPlaying) {
+      // Se não há speaker mas ainda está marcado como playing, atualizar manualmente
+      this.isPlaying = false;
+      this.lastPlaybackEndTime = Date.now();
     }
 
     this.clearStreamState();
@@ -643,6 +679,7 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
       this.currentSpeaker = null;
     }
     this.isPlaying = false;
+    this.lastPlaybackEndTime = Date.now();
     this.audioQueue = [];
   }
 

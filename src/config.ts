@@ -25,8 +25,8 @@ export const config = {
     apiKey: process.env.OPENAI_API_KEY!,
     // Modelo de transcrição
     transcriptionModel: 'whisper-1', // ou 'gpt-4o-transcribe' para maior precisão
-    // Modelo LLM
-    llmModel: 'gpt-4o', // ou usar Realtime API
+    // Modelo LLM - gpt-4o-mini é mais rápido (~500-800ms vs ~1000-1500ms do gpt-4o)
+    llmModel: 'gpt-4o-mini', // Menor latência, adequado para conversas simples
     useRealtimeApi: false, // Toggle para testar Realtime vs Chat Completions
   },
 
@@ -39,7 +39,7 @@ export const config = {
       modelId: 'scribe_v2_realtime',
       sampleRate: 16000,
       language: 'pt',
-      vadSilenceThresholdMs: 500, // Tempo de silêncio para detectar fim da fala
+      vadSilenceThresholdMs: 300, // Tempo de silêncio para detectar fim da fala (300ms = 0.3s - balance entre latência e precisão)
     },
   },
 
@@ -63,26 +63,32 @@ export const config = {
 
   // Agente
   agent: {
-    systemPrompt: `Você é um assistente de vendas da ZapVoice, uma empresa que oferece soluções de automação para WhatsApp Business.
+    systemPrompt: `Você é uma vendedora da ZapVoice fazendo uma ligação de prospecção. Você está ligando para apresentar soluções de automação para WhatsApp Business.
 
-Seu objetivo é:
-1. Apresentar-se brevemente
-2. Identificar se a pessoa tem interesse em automação de atendimento
-3. Qualificar o lead (tamanho da empresa, volume de mensagens, pain points)
-4. Agendar uma demonstração se houver interesse
+FASE ATUAL DA CONVERSA:
+{context}
 
-Regras:
-- Seja natural e conversacional, como uma pessoa real
+NOME DO CLIENTE: {prospectName}
+EMPRESA: {companyName}
+
+FLUXO DA LIGAÇÃO:
+1. PRIMEIRO: Coletar o nome do cliente (se ainda não souber)
+2. SEGUNDO: Se apresentar brevemente como vendedora da ZapVoice
+3. TERCEIRO: Apresentar o produto de forma concisa (máximo 2-3 frases)
+4. DEPOIS: Qualificar interesse, responder perguntas e agendar demonstração se houver interesse
+
+REGRAS IMPORTANTES:
+- Seja natural e conversacional, como uma vendedora real fazendo ligação
 - Fale de forma concisa (máximo 2-3 frases por vez)
-- Use o nome da pessoa quando apropriado
-- Se não entender algo, peça para repetir educadamente
-- Nunca invente informações sobre preços específicos
+- Use o nome do cliente quando souber
+- Se não souber o nome ainda, pergunte educadamente: "Com quem eu estou falando?" ou "Qual seu nome?"
+- IMPORTANTE: Se o cliente mencionar um nome próprio na resposta (mesmo que não seja uma apresentação formal), reconheça e use esse nome. Exemplos: "Seu fogo com o Oscar" → o nome é Oscar; "Fala com João" → o nome é João
+- SEMPRE use um nome real para você (Ana, Maria, Taís, etc.) - NUNCA use placeholders como [seu nome] ou [nome]
+- Se não entender algo, peça para repetir educadamente APENAS se realmente não entender - se conseguir identificar um nome, use-o e continue a conversa
+- Nunca invente informações sobre preços específicos - diga que precisa verificar ou agendar uma conversa
 - Se a pessoa não tiver interesse, agradeça e encerre educadamente
 - NÃO comece suas respostas com palavras como "Entendi", "Certo", "Então", "Perfeito" - vá direto ao ponto
-
-Contexto atual: {context}
-Nome do prospect: {prospectName}
-Empresa: {companyName}
+- Mantenha o tom profissional mas amigável de uma vendedora
 `,
     // Tempo máximo de silêncio antes de prompt de acompanhamento (ms)
     maxSilenceMs: 5000,
@@ -94,12 +100,11 @@ Empresa: {companyName}
   fillers: {
     // Fillers genéricos - sons curtos e naturais (~0.2-0.5s)
     generic: [
-      'Uhum...',       // ~0.3s
-      'Hmm...',        // ~0.3s
-      'Ah sim...',     // ~0.5s
-      'Tá...',         // ~0.2s
-      'Aham...',       // ~0.3s
-      'Sei...',        // ~0.3s
+      'Uhum',          // ~0.2s - sem reticências para soar mais natural
+      'Hmm',           // ~0.2s
+      'Ah',            // ~0.1s - muito curto
+      'Tá',            // ~0.1s
+      'Aham',          // ~0.2s
     ],
     // Templates com nome (usar {name} como placeholder)
     withName: [
@@ -109,25 +114,26 @@ Empresa: {companyName}
     ],
     // Fillers para transição - curtos
     transition: [
-      'Então...',      // ~0.4s
-      'Bom...',        // ~0.3s
-      'Olha...',       // ~0.3s
+      'Então',         // ~0.3s
+      'Bom',           // ~0.2s
+      'Olha',          // ~0.2s
     ],
     // Fillers para clarificação - simples
     clarification: [
-      'Hmm...',
-      'Ah...',
+      'Hmm',
+      'Ah',
     ],
   },
 
   // Métricas
   metrics: {
-    // Thresholds de alerta (ms)
+    // Thresholds de alerta (ms) - ajustados para latência REAL
     alertThresholds: {
-      stt: 500,      // STT deveria ser < 500ms
+      stt: 300,      // STT REAL deveria ser < 300ms (tempo até primeira parcial, não total)
       llm: 1000,     // LLM deveria ser < 1000ms
       tts: 200,      // TTS deveria ser < 200ms
-      total: 1500,   // Total voice-to-voice < 1500ms
+      total: 1500,   // Total voice-to-voice < 1500ms (STT real + LLM + TTS)
+      timeToFirstAudio: 1500, // Tempo até primeiro áudio < 1500ms
     },
     // Salvar métricas detalhadas
     saveDetailedMetrics: true,
