@@ -833,7 +833,14 @@ export const config = {
       modelId: 'scribe_v2_realtime',
       sampleRate: 16000,
       language: 'pt',
-      vadSilenceThresholdMs: 300,
+      // VAD silence threshold: tempo de silêncio para considerar fim da fala
+      // NOTA: Com o sistema de "cancelar e reprocessar" ativo, valores menores são aceitáveis
+      // pois se o usuário continuar falando, o sistema cancela e aguarda a fala completa
+      // 
+      // 300ms: muito agressivo - muitos cancelamentos
+      // 500ms: equilibrado (RECOMENDADO com sistema de reprocessamento)
+      // 700ms: conservador - menos cancelamentos, maior latência
+      vadSilenceThresholdMs: parseInt(process.env.VAD_SILENCE_MS || '500'),
     },
   },
 
@@ -902,10 +909,42 @@ Exemplos RUIM:
 Gere APENAS a frase:`,
   },
 
+  // Acknowledgments: onomatopeias de escuta ativa ("Uhum", "Hm", "Certo")
+  // Tocadas quando usuário continua falando após uma pausa
+  // Dá feedback de que o agente está ouvindo
+  acknowledgments: {
+    enabled: process.env.ACKNOWLEDGMENTS_ENABLED !== 'false', // Habilitado por padrão
+    phrases: ['Uhum', 'Hm', 'Certo', 'Tá'],
+    cooldownMs: 3000, // Mínimo 3s entre acknowledgments (evita repetição)
+  },
+
   backgroundMusic: {
     enabled: true,
     volume: 0.25,
     filePath: 'src/audio/fundo.mp3',
+  },
+
+  // ============================================================================
+  // CANCELAMENTO DE ECO (AEC - Acoustic Echo Cancellation)
+  // ============================================================================
+  // Permite usar a aplicação sem fones de ouvido, filtrando o eco do agente
+  // captado pelo microfone.
+  //
+  // Como funciona:
+  // 1. Armazena o áudio que está sendo reproduzido (voz do agente) em buffer
+  // 2. Compara cada chunk do microfone com o buffer usando correlação cruzada
+  // 3. Se correlação > threshold, o chunk é classificado como eco e ignorado
+  //
+  // AJUSTE DE THRESHOLD:
+  // - Muito baixo (0.2-0.3): Mais sensível - detecta mais eco, mas pode bloquear fala do usuário
+  // - Recomendado (0.35-0.45): Equilíbrio entre detecção e falsos positivos
+  // - Muito alto (0.5-0.7): Menos sensível - deixa passar mais eco, mas menos falsos positivos
+  //
+  echoCancellation: {
+    enabled: process.env.AEC_ENABLED !== 'false', // Habilitado por padrão
+    correlationThreshold: parseFloat(process.env.AEC_THRESHOLD || '0.35'), // 0.0 a 1.0
+    referenceBufferMs: 800,        // Tamanho do buffer de referência em ms
+    latencyCompensationMs: 80,     // Compensar delay entre playback e captura
   },
 
   metrics: {

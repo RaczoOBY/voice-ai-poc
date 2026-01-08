@@ -19,6 +19,7 @@ import {
 } from '../types';
 import { Logger } from '../utils/Logger';
 import { config } from '../config';
+import { EchoCanceller, EchoCancellerConfig } from '../utils/EchoCanceller';
 
 // Interface para Speaker
 interface SpeakerOptions {
@@ -131,9 +132,24 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
   private backgroundMusicVolume: number = config.backgroundMusic?.volume ?? 0.12;
   private backgroundMusicPath: string = path.resolve(process.cwd(), config.backgroundMusic?.filePath ?? 'src/audio/fundo.mp3');
 
-  constructor() {
+  // Cancelamento de eco (AEC)
+  private echoCanceller: EchoCanceller;
+
+  constructor(echoCancellerConfig?: Partial<EchoCancellerConfig>) {
     super();
     this.logger = new Logger('LocalAudio');
+    
+    // Inicializar cancelador de eco com configurações do config.ts ou padrão
+    const aecConfig = (config as any).echoCancellation || {};
+    this.echoCanceller = new EchoCanceller({
+      enabled: aecConfig.enabled ?? true,
+      correlationThreshold: aecConfig.correlationThreshold ?? 0.35,
+      referenceBufferMs: aecConfig.referenceBufferMs ?? 800,
+      latencyCompensationMs: aecConfig.latencyCompensationMs ?? 80,
+      sampleRate: MIC_SAMPLE_RATE,
+      debug: (config.debug?.logLevel === 'debug'),
+      ...echoCancellerConfig,
+    });
   }
 
   /**
@@ -258,6 +274,8 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
    * Modo 'internal' (Whisper): Faz VAD manual baseado em energia
    * 
    * Em ambos os modos, mantém a lógica de barge-in para interromper reprodução
+   * 
+   * NOVO: Usa EchoCanceller para filtrar eco do agente antes de enviar para o Scribe
    */
   private processAudioChunk(callId: string, chunk: Buffer): void {
     const now = Date.now();
@@ -265,9 +283,9 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
     
     // MODO EXTERNO (Scribe): Envia chunks diretamente, VAD é feito pelo Scribe
     if (this.vadMode === 'external') {
-      // PROTEÇÃO CONTRA FEEDBACK: Não enviar áudio para o Scribe enquanto está reproduzindo
-      // ou logo após parar (evita transcrever o próprio áudio do agente)
-      const timeSincePlayback = now - this.lastPlaybackEndTime;
+      // PROTEÇÃO CONTRA FEEDBACK via EchoCanceller
+      // Verifica se o chunk é eco do agente (correlação com áudio de referência)
+      const echoAnalysis = this.echoCanceller.process(chunk);
       
       if (this.isPlaying) {
         // Durante playback: verificar barge-in E guardar áudio no buffer circular
@@ -281,30 +299,48 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
         
         const bargeInThreshold = VAD_CONFIG.ENERGY_THRESHOLD * VAD_CONFIG.BARGE_IN_ENERGY_MULTIPLIER;
         
+        // LÓGICA DE BARGE-IN MELHORADA:
+        // 1. Se energia é MUITO alta (3x threshold), é quase certamente fala do usuário
+        // 2. Se energia é alta mas não extrema, verificar se não é eco
+        // A voz do usuário falando "por cima" é tipicamente MUITO mais forte que o eco
+        const isVeryHighEnergy = energy > bargeInThreshold * 3;
+        const isHighEnergy = energy > bargeInThreshold;
+        
+        // Para barge-in, ser mais PERMISSIVO com eco:
+        // - Se correlação < 0.5, provavelmente não é eco (threshold normal é 0.35)
+        // - Se confiança < 0.7, não é eco confiável o suficiente para bloquear barge-in
+        const isDefinitelyEcho = echoAnalysis.isEcho && 
+                                 echoAnalysis.correlation > 0.5 && 
+                                 echoAnalysis.confidence > 0.7;
+        
         // Log de debug para monitorar níveis de energia durante playback
         if (energy > VAD_CONFIG.ENERGY_THRESHOLD * 0.5) {
-          this.logger.debug(`🎤 Durante playback: energia=${energy.toFixed(4)}, threshold=${bargeInThreshold.toFixed(4)}, frames=${this.consecutiveSpeechFrames}`);
+          this.logger.debug(`🎤 Durante playback: energia=${energy.toFixed(4)}, threshold=${bargeInThreshold.toFixed(4)}, frames=${this.consecutiveSpeechFrames}, corr=${echoAnalysis.correlation.toFixed(3)}, eco=${isDefinitelyEcho ? 'SIM' : 'NÃO'}`);
         }
         
-        if (energy > bargeInThreshold) {
+        // Considera barge-in se:
+        // 1. Energia MUITO alta (quase certamente é fala do usuário), OU
+        // 2. Energia alta E não é definitivamente eco
+        if (isVeryHighEnergy || (isHighEnergy && !isDefinitelyEcho)) {
           this.consecutiveSpeechFrames++;
-          this.logger.debug(`🎤 Barge-in potencial: ${this.consecutiveSpeechFrames}/${VAD_CONFIG.BARGE_IN_CONFIRM_FRAMES} frames`);
+          this.logger.debug(`🎤 Barge-in potencial: ${this.consecutiveSpeechFrames}/${VAD_CONFIG.BARGE_IN_CONFIRM_FRAMES} frames (energia ${isVeryHighEnergy ? 'MUITO ALTA' : 'alta'})`);
           
           if (!this.bargeInTriggered && 
               this.consecutiveSpeechFrames >= VAD_CONFIG.BARGE_IN_CONFIRM_FRAMES) {
-            this.logger.info(`🔇 Barge-in confirmado! (energia: ${energy.toFixed(4)})`);
+            this.logger.info(`🔇 Barge-in confirmado! (energia: ${energy.toFixed(4)}, corr: ${echoAnalysis.correlation.toFixed(3)})`);
             this.stopPlayback();
             this.playbackInterrupted = true;
             this.bargeInTriggered = true;
             this.emit('playback:interrupted', callId);
-            // Após barge-in, enviar buffer acumulado e resetar cooldown
+            // Após barge-in, enviar buffer acumulado (filtrado por eco) e resetar cooldown
             this.flushPlaybackBuffer(callId);
             this.lastPlaybackEndTime = Date.now() - LocalAudioProvider.PLAYBACK_COOLDOWN_MS;
           }
         } else {
-          // Resetar apenas se energia caiu significativamente
+          // Resetar apenas se energia caiu significativamente OU é definitivamente eco
           if (this.consecutiveSpeechFrames > 0) {
-            this.logger.debug(`🎤 Barge-in reset: energia muito baixa (${energy.toFixed(4)})`);
+            const reason = isDefinitelyEcho ? `eco confirmado (corr: ${echoAnalysis.correlation.toFixed(3)})` : `energia muito baixa (${energy.toFixed(4)})`;
+            this.logger.debug(`🎤 Barge-in reset: ${reason}`);
           }
           this.consecutiveSpeechFrames = 0;
           this.bargeInTriggered = false;
@@ -314,9 +350,20 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
       
       // Se acabou de parar de reproduzir, esperar cooldown antes de enviar para Scribe
       // (exceto se foi barge-in, que já resetou o cooldown)
+      const timeSincePlayback = now - this.lastPlaybackEndTime;
       if (timeSincePlayback < LocalAudioProvider.PLAYBACK_COOLDOWN_MS) {
-        // Durante cooldown, NÃO adicionar ao buffer (pode ser eco do agente)
+        // Durante cooldown, verificar se é eco antes de descartar
+        // Se NÃO é eco, pode ser início de fala do usuário
+        if (!echoAnalysis.isEcho && energy > VAD_CONFIG.ENERGY_THRESHOLD) {
+          this.logger.debug(`🎤 Possível fala durante cooldown (não é eco) - aguardando...`);
+        }
         return; // Ainda em cooldown, não enviar
+      }
+      
+      // FILTRO DE ECO: Se detectado como eco, não enviar para o Scribe
+      if (echoAnalysis.isEcho) {
+        this.logger.debug(`🔇 Chunk ignorado (eco): corr=${echoAnalysis.correlation.toFixed(3)}, conf=${echoAnalysis.confidence.toFixed(2)}`);
+        return;
       }
       
       // Limpar buffer quando cooldown termina (não era barge-in, só fim normal)
@@ -326,7 +373,7 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
         this.playbackAudioBuffer = [];
       }
       
-      // Agora sim, enviar chunk para o Scribe em tempo real
+      // Agora sim, enviar chunk para o Scribe em tempo real (não é eco)
       const chunkCallback = this.audioChunkCallbacks.get(callId);
       if (chunkCallback) {
         chunkCallback(chunk);
@@ -616,6 +663,12 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
 
     this.logger.debug(`🔊 Reproduzindo ${audioBuffer.length} bytes...`);
     
+    // Alimentar o EchoCanceller com o áudio de referência
+    // Nota: O áudio de referência pode ter sample rate diferente (22050Hz)
+    // mas isso é tratado internamente pelo EchoCanceller
+    this.echoCanceller.clearReference(); // Limpar referência anterior
+    this.echoCanceller.feedReference(audioBuffer);
+    
     return new Promise((resolve, reject) => {
       if (!this.Speaker) {
         reject(new Error('Speaker não inicializado'));
@@ -635,6 +688,7 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
         this.isPlaying = false;
         this.lastPlaybackEndTime = Date.now();
         this.currentSpeaker = null;
+        this.echoCanceller.endPlayback(); // Notificar fim do playback
         resolve();
       });
 
@@ -642,6 +696,7 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
         this.isPlaying = false;
         this.lastPlaybackEndTime = Date.now();
         this.currentSpeaker = null;
+        this.echoCanceller.endPlayback();
         reject(error);
       });
 
@@ -677,6 +732,7 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
    * Envia áudio para reprodução em streaming (com buffer inteligente)
    * - Acumula um PRE_BUFFER antes de começar a reproduzir
    * - Preenche com silêncio se os chunks atrasarem
+   * - Alimenta o EchoCanceller com cada chunk de referência
    */
   async sendAudioStream(callId: string, audioChunk: Buffer): Promise<void> {
     await this.initAudioModules();
@@ -685,6 +741,10 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
     if (this.playbackInterrupted) {
       return;
     }
+
+    // Alimentar o EchoCanceller com cada chunk de áudio de referência
+    // Isso permite detecção de eco em tempo real durante streaming
+    this.echoCanceller.feedReference(audioChunk);
 
     // Adicionar ao buffer
     this.streamBuffer.push(audioChunk);
@@ -714,6 +774,9 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
     // IMPORTANTE: Limpar o buffer de captura quando começamos a reproduzir
     // Isso evita capturar o eco do agente e enviar pro Scribe
     this.playbackAudioBuffer = [];
+    
+    // Nota: NÃO limpar referência do EchoCanceller aqui pois já temos chunks acumulados
+    // que serão usados para detecção de eco
 
     this.currentSpeaker = new this.Speaker({
       channels: CHANNELS,
@@ -901,6 +964,9 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
       this.lastPlaybackEndTime = Date.now();
     }
 
+    // Notificar EchoCanceller que o playback terminou
+    this.echoCanceller.endPlayback();
+
     this.clearStreamState();
   }
 
@@ -919,6 +985,9 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
     this.isPlaying = false;
     this.lastPlaybackEndTime = Date.now();
     this.audioQueue = [];
+    
+    // Notificar EchoCanceller que o playback foi interrompido
+    this.echoCanceller.endPlayback();
   }
 
   /**
@@ -1031,5 +1100,61 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
       isPlaying: this.isPlaying,
       isSpeaking: this.isSpeaking,
     };
+  }
+
+  // ============================================================================
+  // MÉTODOS DO ECHO CANCELLER
+  // ============================================================================
+
+  /**
+   * Habilita/desabilita o cancelamento de eco
+   */
+  setEchoCancellationEnabled(enabled: boolean): void {
+    this.echoCanceller.setEnabled(enabled);
+  }
+
+  /**
+   * Verifica se o cancelamento de eco está habilitado
+   */
+  isEchoCancellationEnabled(): boolean {
+    return this.echoCanceller.isEnabled();
+  }
+
+  /**
+   * Define o threshold de correlação para detecção de eco
+   * Valores menores = mais sensível (detecta mais eco, pode ter falsos positivos)
+   * Valores maiores = menos sensível (detecta menos eco, pode deixar passar eco)
+   * Recomendado: 0.3 a 0.5
+   */
+  setEchoCorrelationThreshold(threshold: number): void {
+    this.echoCanceller.setCorrelationThreshold(threshold);
+  }
+
+  /**
+   * Ativa/desativa logs de debug do cancelador de eco
+   */
+  setEchoCancellationDebug(debug: boolean): void {
+    this.echoCanceller.setDebug(debug);
+  }
+
+  /**
+   * Retorna estatísticas do cancelador de eco
+   */
+  getEchoCancellationStats(): {
+    totalProcessed: number;
+    echoDetected: number;
+    echoPercentage: number;
+    avgCorrelation: number;
+    isPlaybackActive: boolean;
+    bufferFilled: boolean;
+  } {
+    return this.echoCanceller.getStats();
+  }
+
+  /**
+   * Reseta estatísticas do cancelador de eco
+   */
+  resetEchoCancellationStats(): void {
+    this.echoCanceller.resetStats();
   }
 }

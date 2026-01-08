@@ -87,6 +87,22 @@ export class StreamingVoiceAgent extends EventEmitter {
   private prebuiltLLMContext: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> | null = null;
   private partialSentenceComplete: boolean = false; // Indica se detectamos fim de frase na parcial
 
+  // Sistema de cancelamento e reprocessamento
+  // Quando usuário volta a falar durante processamento (antes do áudio), cancela e reprocessa
+  private shouldCancelProcessing: boolean = false; // Flag para cancelar processamento atual
+  private pendingTranscriptionText: string = ''; // Transcrição que estava sendo processada
+  private continuationDetected: boolean = false; // Usuário continuou falando
+  private hasStartedPlayback: boolean = false; // Flag para saber se já enviamos áudio (mais preciso que isCurrentlyPlaying)
+  
+  // 🆕 Transcrição parcial durante reprodução (para usar após barge-in)
+  private partialDuringPlayback: string = ''; // Guarda transcrição parcial enquanto agente fala
+  private lastPartialDuringPlaybackTime: number = 0; // Timestamp da última parcial durante playback
+  
+  // 🆕 Anti-eco: guardar última resposta do agente para filtrar
+  private lastAgentResponse: string = ''; // Última resposta do agente
+  private lastCancelLogTime: number = 0; // Para debounce de logs de cancelamento
+  private static readonly CANCEL_LOG_DEBOUNCE_MS = 500; // Mínimo entre logs de cancelamento
+
   // Gravação de chamadas
   private callRecorder: CallRecorder | null = null;
   private audioRoom: AudioRoom | null = null;
@@ -219,11 +235,84 @@ export class StreamingVoiceAgent extends EventEmitter {
       
       // Callback para transcrições finais do Scribe
       this.config.transcriber.onTranscript!(callId, async (result) => {
+        const resultText = result.text.trim();
+        
+        // 🆕 PRIMEIRO: Verificar se é eco do agente (ignorar completamente)
+        if (this.isLikelyAgentEcho(resultText)) {
+          this.logger.info(`🔇 Ignorando eco do agente na transcrição final: "${resultText}"`);
+          // Resetar flags de cancelamento se estavam setadas
+          if (this.shouldCancelProcessing) {
+            this.shouldCancelProcessing = false;
+            this.continuationDetected = false;
+          }
+          return; // Não processar eco
+        }
+        
+        // 🆕 Verificar se transcrição parece corrompida (eco do agente, onomatopeias)
+        const isLikelyCorrupted = this.isTranscriptionCorrupted(resultText);
+        
+        // 🆕 Se temos transcrição parcial capturada durante playback e resultado parece corrompido
+        if (this.partialDuringPlayback && isLikelyCorrupted) {
+          this.logger.warn(`⚠️ Transcrição final parece corrompida: "${resultText}"`);
+          this.logger.info(`🔄 Usando transcrição parcial capturada: "${this.partialDuringPlayback.substring(0, 50)}..."`);
+          
+          // Usar a transcrição parcial em vez da corrompida
+          const fixedResult: TranscriptionResult = {
+            ...result,
+            text: this.partialDuringPlayback,
+          };
+          
+          // Resetar
+          this.partialDuringPlayback = '';
+          this.continuationDetected = false;
+          this.pendingTranscriptionText = '';
+          
+          if (!this.isGreetingInProgress) {
+            await this.processTranscription(callId, fixedResult);
+          }
+          return;
+        }
+        
+        // 🆕 Se detectamos continuação, esta é a transcrição completa - juntar com anterior
+        if (this.continuationDetected && this.pendingTranscriptionText) {
+          const combinedText = `${this.pendingTranscriptionText} ${result.text}`.trim();
+          this.logger.info(`🔗 Transcrições combinadas: "${combinedText.substring(0, 50)}..."`);
+          
+          // Criar novo resultado com texto combinado
+          const combinedResult: TranscriptionResult = {
+            ...result,
+            text: combinedText,
+          };
+          
+          // Resetar flags
+          this.continuationDetected = false;
+          this.pendingTranscriptionText = '';
+          this.shouldCancelProcessing = false;
+          this.partialDuringPlayback = '';
+          
+          // Processar transcrição combinada
+          await this.processTranscription(callId, combinedResult);
+          return;
+        }
+        
+        // Resetar transcrição parcial (não usada)
+        this.partialDuringPlayback = '';
+        
         if (!this.isGreetingInProgress && !this.isProcessing) {
           this.logger.debug(`📝 Recebida transcrição do Scribe: "${result.text}"`);
           await this.processTranscription(callId, result);
+        } else if (this.isProcessing) {
+          // Estamos processando, mas não detectamos continuação via parciais
+          // Pode acontecer se a fala foi muito rápida - marcar para reprocessar
+          this.logger.debug(`⚠️ Nova transcrição durante processamento: "${result.text.substring(0, 30)}..."`);
+          if (!this.config.localProvider.isCurrentlyPlaying()) {
+            // Ainda não começou áudio - marcar para cancelar e reprocessar
+            this.shouldCancelProcessing = true;
+            this.continuationDetected = true;
+            // A próxima transcrição vai combinar
+          }
         } else {
-          this.logger.debug(`⚠️ Transcrição ignorada - greeting: ${this.isGreetingInProgress}, processing: ${this.isProcessing}`);
+          this.logger.debug(`⚠️ Transcrição ignorada - greeting: ${this.isGreetingInProgress}`);
         }
       });
       
@@ -247,9 +336,62 @@ export class StreamingVoiceAgent extends EventEmitter {
         this.config.transcriber.onPartialTranscript(callId, (text) => {
           this.emit('partial:transcript', callId, text);
           
+          const trimmedText = text.trim();
+          
+          // 🆕 Filtrar eco do agente PRIMEIRO - evita falsos positivos
+          if (this.isLikelyAgentEcho(trimmedText)) {
+            this.logger.debug(`🔇 Ignorando eco do agente: "${trimmedText.substring(0, 30)}..."`);
+            return; // Não processar eco
+          }
+          
+          // 🆕 Filtrar transcrições muito curtas ou onomatopeias
+          const isNoise = /^(h+[um]+|hum+|uhum+|ah+|eh+|oh+|uh+)[.!?,\s]*$/i.test(trimmedText) 
+                         || trimmedText.length < 5;
+          if (isNoise) {
+            this.logger.debug(`🔇 Ignorando ruído/onomatopeia: "${trimmedText}"`);
+            return;
+          }
+          
+          // 🆕 DETECÇÃO DE CONTINUAÇÃO: Se estamos processando E usuário volta a falar
+          // Cancela processamento atual para reprocessar com transcrição completa
+          if (this.isProcessing && !this.isGreetingInProgress && trimmedText.length > 5) {
+            
+            if (!this.hasStartedPlayback) {
+              // CASO 1: Áudio ainda não começou - cancela silenciosamente e reprocessa
+              // 🆕 Só cancela se ainda não cancelou (evita loop)
+              if (!this.shouldCancelProcessing) {
+                this.logger.info(`🔄 Usuário continuou falando: "${trimmedText.substring(0, 30)}..." - cancelando processamento`);
+                this.shouldCancelProcessing = true;
+                this.continuationDetected = true;
+                this.pendingTranscriptionText = trimmedText; // Guardar para combinar depois
+                
+                // 🎵 Tocar onomatopeia de escuta ativa ("Uhum", "Hm", "Ok")
+                this.playListeningAcknowledgment(callId).catch(err => {
+                  this.logger.debug('Erro ao tocar acknowledgment (não crítico):', err);
+                });
+              }
+            } else {
+              // CASO 2: Áudio já começou - guardar transcrição parcial e fazer barge-in
+              // Filtrar repetições de "oi" (eco comum)
+              const isLikelyEcho = /^(oi[,.\s]*)+$/i.test(trimmedText);
+              
+              if (!isLikelyEcho && trimmedText.length > this.partialDuringPlayback.length) {
+                this.partialDuringPlayback = trimmedText;
+                this.lastPartialDuringPlaybackTime = Date.now();
+                this.logger.info(`👂 Transcrição parcial durante playback: "${trimmedText.substring(0, 40)}..."`);
+                
+                // 🔇 Disparar barge-in via código (não esperar EchoCanceller)
+                if (!this.wasInterrupted) {
+                  this.logger.info('🔇 Barge-in via transcrição parcial - usuário está falando!');
+                  this.config.localProvider.stopPlayback();
+                }
+              }
+            }
+          }
+          
           // Pré-processamento: detectar possível fim de frase e pré-construir contexto LLM
-          if (!this.isProcessing && !this.isGreetingInProgress && text.length > 5) {
-            this.handlePartialTranscriptForPreprocessing(callId, text);
+          if (!this.isProcessing && !this.isGreetingInProgress && trimmedText.length > 5) {
+            this.handlePartialTranscriptForPreprocessing(callId, trimmedText);
           }
         });
       }
@@ -272,7 +414,15 @@ export class StreamingVoiceAgent extends EventEmitter {
         this.currentMetrics.interrupted = true;
       }
       
-      this.logger.info('🔇 Barge-in detectado - cancelando TODOS os processamentos');
+      // 🆕 Se temos transcrição parcial capturada durante playback, logar
+      if (this.partialDuringPlayback) {
+        this.logger.info(`🔇 Barge-in detectado - transcrição parcial capturada: "${this.partialDuringPlayback.substring(0, 50)}..."`);
+        // Guardar a transcrição parcial como "pendente" para usar quando vier a completa
+        this.pendingTranscriptionText = this.partialDuringPlayback;
+        this.continuationDetected = true;
+      } else {
+        this.logger.info('🔇 Barge-in detectado - cancelando TODOS os processamentos');
+      }
       
       // Interromper gravação do agente no AudioRoom (descartar segmento atual)
       if (this.audioRoom) {
@@ -301,11 +451,16 @@ export class StreamingVoiceAgent extends EventEmitter {
         this.pendingTranscriptionCallId = null;
       }
       
+      // Resetar hasStartedPlayback (agente parou de falar)
+      this.hasStartedPlayback = false;
+      
       // Auto-reset do flag após grace period
       setTimeout(() => {
         if (this.bargeInTimestamp > 0 && Date.now() - this.bargeInTimestamp >= StreamingVoiceAgent.BARGE_IN_GRACE_PERIOD_MS) {
           this.wasInterrupted = false;
           this.bargeInTimestamp = 0;
+          // 🆕 Resetar transcrição parcial após grace period
+          this.partialDuringPlayback = '';
           this.logger.debug('✅ Flag de barge-in auto-resetada após grace period');
         }
       }, StreamingVoiceAgent.BARGE_IN_GRACE_PERIOD_MS + 100);
@@ -313,6 +468,11 @@ export class StreamingVoiceAgent extends EventEmitter {
 
     // Iniciar gravação
     await this.config.localProvider.startRecording(callId);
+
+    // 🎵 Pré-carregar áudios de acknowledgment em background (latência zero quando precisar)
+    this.preloadAcknowledgments().catch(err => {
+      this.logger.debug('Erro ao pré-carregar acknowledgments (não crítico):', err);
+    });
 
     this.emit('session:started', callId);
     this.logger.info(`✅ Sessão ${callId} iniciada - Fale algo!`);
@@ -391,6 +551,77 @@ export class StreamingVoiceAgent extends EventEmitter {
   }
 
   /**
+   * Detecta se uma transcrição parece corrompida (eco do agente, onomatopeias repetidas)
+   * Isso acontece quando o Scribe transcreve a fala do agente junto com o usuário
+   */
+  private isTranscriptionCorrupted(text: string): boolean {
+    if (!text || text.length === 0) return true;
+    
+    const normalized = text.toLowerCase().trim();
+    
+    // 1. Muito curta (menos de 5 chars) e não é uma palavra válida
+    if (normalized.length < 5) {
+      // Permitir palavras curtas válidas
+      const validShortWords = ['sim', 'não', 'ok', 'oi', 'olá', 'tá', 'é'];
+      if (!validShortWords.includes(normalized)) {
+        return true;
+      }
+    }
+    
+    // 2. Apenas onomatopeias/interjeições
+    const onomatopeiasPattern = /^(h+[um]+|hum+|uhum+|ah+|eh+|oh+|uh+)[.!?,\s]*$/i;
+    if (onomatopeiasPattern.test(normalized)) {
+      return true;
+    }
+    
+    // 3. Repetições suspeitas (eco do agente dizendo "oi, oi, oi...")
+    const repeatedWordPattern = /^(\w+[,.\s]+)\1{2,}/i;
+    if (repeatedWordPattern.test(normalized)) {
+      return true;
+    }
+    
+    // 4. Muitas repetições de "oi" (padrão comum de eco)
+    const oiCount = (normalized.match(/\boi\b/gi) || []).length;
+    if (oiCount > 3) {
+      return true;
+    }
+    
+    // 5. 🆕 Verificar se é eco do agente (substring do que ele disse)
+    if (this.isLikelyAgentEcho(normalized)) {
+      return true;
+    }
+    
+    return false;
+  }
+
+  /**
+   * Verifica se a transcrição é provavelmente eco do agente
+   * (substring EXATA do que o agente acabou de dizer)
+   * 
+   * IMPORTANTE: Este filtro deve ser conservador!
+   * É normal o usuário usar as mesmas palavras do assunto sendo discutido.
+   * Só filtra se for substring EXATA e significativa (não apenas palavras em comum).
+   */
+  private isLikelyAgentEcho(text: string): boolean {
+    if (!this.lastAgentResponse || text.length < 5) return false;
+    
+    const normalizedText = text.toLowerCase().trim();
+    const normalizedAgent = this.lastAgentResponse.toLowerCase();
+    
+    // Só considera eco se for substring EXATA de pelo menos 10 caracteres
+    // Isso evita falsos positivos com palavras comuns
+    if (normalizedText.length >= 10 && normalizedAgent.includes(normalizedText)) {
+      this.logger.debug(`🔇 Transcrição "${text}" é substring exata do agente`);
+      return true;
+    }
+    
+    // NÃO verificar palavras individuais - muito agressivo!
+    // É normal o usuário falar sobre o mesmo assunto usando palavras em comum.
+    
+    return false;
+  }
+
+  /**
    * Pré-processa transcrições parciais para reduzir latência
    * Detecta padrões de fim de frase e pré-constrói contexto do LLM
    */
@@ -436,6 +667,97 @@ export class StreamingVoiceAgent extends EventEmitter {
     this.lastPartialTime = 0;
     this.prebuiltLLMContext = null;
     this.partialSentenceComplete = false;
+  }
+
+  // Cache de áudio para acknowledgments (evita gerar TTS toda vez)
+  private acknowledgmentAudioCache: Map<string, Buffer> = new Map();
+  private lastAcknowledgmentTime: number = 0;
+
+  /**
+   * Pré-carrega áudios de acknowledgment em background
+   * Garante latência zero quando precisar tocar
+   */
+  private async preloadAcknowledgments(): Promise<void> {
+    // Verificar se acknowledgments estão habilitados
+    if (!appConfig.acknowledgments.enabled) {
+      this.logger.debug('⏭️ Acknowledgments desabilitados');
+      return;
+    }
+    
+    const acknowledgments = appConfig.acknowledgments.phrases;
+    
+    this.logger.debug('🎵 Pré-carregando áudios de acknowledgment...');
+    
+    for (const ack of acknowledgments) {
+      if (!this.acknowledgmentAudioCache.has(ack)) {
+        try {
+          const result = await this.config.tts.synthesize(ack);
+          this.acknowledgmentAudioCache.set(ack, result.audioBuffer);
+        } catch (error) {
+          this.logger.debug(`Erro ao pré-carregar "${ack}":`, error);
+        }
+      }
+    }
+    
+    this.logger.debug(`✅ ${this.acknowledgmentAudioCache.size} acknowledgments pré-carregados`);
+  }
+
+  /**
+   * Toca uma onomatopeia curta de escuta ativa ("Uhum", "Hm", "Ok")
+   * Usado quando detectamos que o usuário continuou falando
+   * Dá feedback de que o agente está ouvindo
+   */
+  private async playListeningAcknowledgment(callId: string): Promise<void> {
+    // Verificar se acknowledgments estão habilitados
+    if (!appConfig.acknowledgments.enabled) {
+      return;
+    }
+    
+    // Cooldown para não ficar repetindo muito
+    const now = Date.now();
+    if (now - this.lastAcknowledgmentTime < appConfig.acknowledgments.cooldownMs) {
+      this.logger.debug('⏳ Acknowledgment em cooldown, pulando');
+      return;
+    }
+    this.lastAcknowledgmentTime = now;
+
+    // Lista de onomatopeias naturais (variação para não parecer robô)
+    const acknowledgments = appConfig.acknowledgments.phrases;
+    const randomAck = acknowledgments[Math.floor(Math.random() * acknowledgments.length)];
+
+    this.logger.info(`🎵 Tocando acknowledgment: "${randomAck}"`);
+
+    try {
+      // Verificar cache primeiro
+      let audioBuffer = this.acknowledgmentAudioCache.get(randomAck);
+
+      if (!audioBuffer) {
+        // Gerar áudio via TTS (primeira vez)
+        this.logger.debug(`Gerando áudio para "${randomAck}"...`);
+        const result = await this.config.tts.synthesize(randomAck);
+        audioBuffer = result.audioBuffer;
+        
+        // Cachear para próximas vezes
+        this.acknowledgmentAudioCache.set(randomAck, audioBuffer);
+        this.logger.debug(`✅ Áudio cacheado para "${randomAck}"`);
+      }
+
+      // Gravar no AudioRoom se disponível
+      if (this.audioRoom) {
+        this.audioRoom.feedAgentAudio(audioBuffer);
+      }
+
+      // Tocar áudio (não bloqueia - é só um feedback rápido)
+      await this.config.localProvider.sendAudio(callId, audioBuffer);
+      
+      // Finalizar segmento
+      if (this.audioRoom) {
+        this.audioRoom.endAgentSegment();
+      }
+    } catch (error) {
+      // Erro não crítico - não deve interromper o fluxo
+      this.logger.debug('Erro ao tocar acknowledgment:', error);
+    }
   }
 
   /**
@@ -582,6 +904,7 @@ export class StreamingVoiceAgent extends EventEmitter {
     // Marcar transcrição como pendente
     this.pendingTranscriptionCallId = callId;
     this.isProcessing = true;
+    this.partialDuringPlayback = ''; // Reset - novo processamento
     const turnId = `turn-${Date.now()}`;
 
     // Métricas - STT já aconteceu via streaming
@@ -639,6 +962,16 @@ export class StreamingVoiceAgent extends EventEmitter {
         return;
       }
 
+      // 🆕 Verificar se deve cancelar (usuário continuou falando)
+      if (this.shouldCancelProcessing) {
+        this.logger.info(`🔄 Cancelando processamento - aguardando continuação do usuário`);
+        this.pendingTranscriptionText = transcriptText; // Salvar para combinar depois
+        this.shouldCancelProcessing = false;
+        this.isProcessing = false;
+        this.pendingTranscriptionCallId = null;
+        return;
+      }
+
       // Fillers genéricos desabilitados - causavam pausas estranhas
       // Apenas fillers contextuais (baseados em transcrições parciais) são usados
 
@@ -668,9 +1001,20 @@ export class StreamingVoiceAgent extends EventEmitter {
 
       this.emit('user:spoke', callId, transcriptText);
 
-      // Verificar barge-in antes de gerar resposta
+      // Verificar barge-in ou continuação antes de gerar resposta
       if (this.wasInterrupted) {
         this.logger.debug('⚠️ Barge-in detectado antes de gerar resposta, cancelando');
+        this.isProcessing = false;
+        this.pendingTranscriptionCallId = null;
+        this.resetPreprocessingState();
+        return;
+      }
+      
+      // 🆕 Verificar se deve cancelar (usuário continuou falando)
+      if (this.shouldCancelProcessing) {
+        this.logger.info(`🔄 Cancelando antes de LLM - usuário ainda está falando`);
+        this.pendingTranscriptionText = transcriptText;
+        this.shouldCancelProcessing = false;
         this.isProcessing = false;
         this.pendingTranscriptionCallId = null;
         this.resetPreprocessingState();
@@ -712,6 +1056,16 @@ export class StreamingVoiceAgent extends EventEmitter {
       this.isProcessing = false;
       this.pendingTranscriptionCallId = null;
       this.resetPreprocessingState(); // Garantir reset do estado de pré-processamento
+      
+      // 🆕 Resetar flags de continuação se processamento completou com sucesso
+      if (!this.shouldCancelProcessing) {
+        this.pendingTranscriptionText = '';
+        this.continuationDetected = false;
+      }
+      
+      // Resetar flag de playback
+      this.hasStartedPlayback = false;
+      
       // Flag de barge-in é resetada automaticamente após o grace period (800ms)
     }
   }
@@ -758,11 +1112,12 @@ export class StreamingVoiceAgent extends EventEmitter {
     this.currentMetrics.interrupted = false;
     this.config.localProvider.resetInterruptState();
     
-    // Notificar STT que agente vai começar a falar (para métricas corretas)
+    // 🆕 Resetar flag de playback - ainda não enviamos áudio
+    this.hasStartedPlayback = false;
+    
+    // NOTA: NÃO chamar setAgentSpeaking(true) aqui - só quando primeiro áudio for enviado
+    // Isso permite detectar se usuário continua falando durante processamento LLM
     const scribe = this.config.transcriber as any;
-    if (scribe.setAgentSpeaking) {
-      scribe.setAgentSpeaking(true);
-    }
     
     // ===== STREAMING REAL: LLM → TTS chunk por chunk =====
     // Delimitadores de sentença/cláusula para dividir texto
@@ -805,6 +1160,13 @@ export class StreamingVoiceAgent extends EventEmitter {
       isProcessingQueue = true;
       
       while (textChunkQueue.length > 0) {
+        // 🆕 Verificar cancelamento antes de processar cada chunk da fila
+        if (this.shouldCancelProcessing && !this.hasStartedPlayback) {
+          this.logger.debug(`🔄 Limpando fila TTS (${textChunkQueue.length} chunks) - usuário continuou falando`);
+          textChunkQueue.length = 0; // Limpar fila
+          break;
+        }
+        
         const item = textChunkQueue.shift()!;
         await processTextChunk(item.text, item.isLast);
       }
@@ -815,6 +1177,12 @@ export class StreamingVoiceAgent extends EventEmitter {
     // Função para processar um chunk de texto no TTS
     const processTextChunk = async (text: string, isLast: boolean = false): Promise<void> => {
       if (!text.trim() || this.currentMetrics?.interrupted) return;
+      
+      // 🆕 Verificar se deve cancelar antes de enviar para TTS
+      if (this.shouldCancelProcessing && !this.hasStartedPlayback) {
+        this.logger.debug('🔄 Cancelando TTS - usuário continuou falando');
+        return;
+      }
       
       const idx = chunkIndex++;
       this.logger.debug(`📝 TTS chunk ${idx}: "${text.substring(0, 30)}..."`);
@@ -831,6 +1199,13 @@ export class StreamingVoiceAgent extends EventEmitter {
         await this.config.tts.synthesizeStream(text, async (audioChunk: Buffer) => {
           if (this.currentMetrics?.interrupted) return;
 
+          // 🆕 Verificar cancelamento ANTES de iniciar reprodução
+          // Isso é crítico: se usuário voltou a falar durante LLM/TTS, não reproduzir
+          if (this.shouldCancelProcessing && !this.hasStartedPlayback) {
+            this.logger.debug('🔄 Cancelando reprodução - usuário continuou falando');
+            return; // Não reproduzir este chunk nem os próximos
+          }
+
           if (isFirstAudio) {
             this.currentMetrics!.ttsFirstChunk = Date.now();
             this.currentMetrics!.playbackStart = Date.now();
@@ -838,6 +1213,15 @@ export class StreamingVoiceAgent extends EventEmitter {
             const timeToFirstAudio = this.currentMetrics!.ttsFirstChunk - this.currentMetrics!.sttEnd;
             this.logger.info(`⚡ Time to First Audio: ${timeToFirstAudio}ms (LLM: ${llmFirstTokenTime - this.currentMetrics!.llmStart}ms)`);
             isFirstAudio = false;
+            
+            // 🆕 Marcar que já começamos a reproduzir (não pode mais cancelar)
+            this.hasStartedPlayback = true;
+            
+            // 🔊 AGORA sim o agente está falando - notificar STT
+            // Isso permite que transcrições parciais sejam detectadas ANTES do áudio começar
+            if (scribe.setAgentSpeaking) {
+              scribe.setAgentSpeaking(true);
+            }
           }
 
           // Gravar áudio do agente no AudioRoom
@@ -855,6 +1239,12 @@ export class StreamingVoiceAgent extends EventEmitter {
     
     // Adicionar chunk à fila e processar
     const enqueueTextChunk = (text: string, isLast: boolean = false): void => {
+      // 🆕 Não adicionar à fila se cancelamento foi solicitado
+      if (this.shouldCancelProcessing && !this.hasStartedPlayback) {
+        this.logger.debug('🔄 Ignorando chunk TTS - cancelamento solicitado');
+        return;
+      }
+      
       textChunkQueue.push({ text, isLast });
       // Iniciar processamento se não estiver rodando
       processQueueSequentially().catch(err => {
@@ -867,6 +1257,23 @@ export class StreamingVoiceAgent extends EventEmitter {
       try {
         const response = await this.config.llm.generateStream(messages, (chunk: string) => {
           if (this.currentMetrics?.interrupted) return;
+          
+          // 🆕 Verificar se deve cancelar (usuário continuou falando)
+          if (this.shouldCancelProcessing) {
+            if (this.hasStartedPlayback) {
+              // Já enviamos algum áudio, não podemos cancelar mais - continuar normalmente
+              return;
+            } else {
+              // Ainda não enviamos áudio - podemos cancelar
+              // 🆕 Debounce para não logar várias vezes
+              const now = Date.now();
+              if (now - this.lastCancelLogTime > StreamingVoiceAgent.CANCEL_LOG_DEBOUNCE_MS) {
+                this.logger.info('🔄 Cancelando LLM streaming - usuário continuou falando');
+                this.lastCancelLogTime = now;
+              }
+              return;
+            }
+          }
           
           // Marcar primeiro token
           if (llmFirstTokenTime === 0) {
@@ -943,6 +1350,16 @@ export class StreamingVoiceAgent extends EventEmitter {
       await processTextChunk(fullResponse, true);
     }
 
+    // 🆕 Se foi cancelado antes de qualquer áudio, não adicionar ao histórico
+    if (this.shouldCancelProcessing && !this.hasStartedPlayback) {
+      this.logger.info('🔄 Processamento cancelado antes do áudio - aguardando continuação');
+      // Notificar STT que agente não está mais "falando" (nunca começou)
+      if (scribe.setAgentSpeaking) {
+        scribe.setAgentSpeaking(false);
+      }
+      return; // Sair sem adicionar ao histórico
+    }
+    
     // Finalizar streaming
     this.config.localProvider.endAudioStream();
     
@@ -970,6 +1387,9 @@ export class StreamingVoiceAgent extends EventEmitter {
 
     this.logger.info(`🤖 Resposta: "${fullResponse.substring(0, 80)}${fullResponse.length > 80 ? '...' : ''}"`);
     this.emit('agent:spoke', callId, fullResponse);
+    
+    // 🆕 Guardar resposta para filtrar eco
+    this.lastAgentResponse = fullResponse;
 
     // Disparar processamento de pensamentos em paralelo (não bloqueia)
     // Aproveita o tempo de reprodução do áudio (~1-3s) enquanto o usuário ouve
