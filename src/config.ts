@@ -379,11 +379,14 @@ Tom: Simpático e profissional.`,
     condition: 'turn_range',
     conditionConfig: { minTurn: 0, maxTurn: 1 },
     instruction: `FASE: Contextualização
-Você já sabe o nome ({prospectName}).
-Contextualize o contato:
-"Vi que você se cadastrou com interesse em melhorar seu atendimento no WhatsApp. Você tá buscando uma forma de atender mais gente sem ficar preso no celular o dia todo, é isso?"
+Você já sabe o nome ({prospectName}). Agora contextualize de forma NATURAL e CURTA.
 
-Depois: "Vou explicar tudo em detalhes. Só preciso antes entender melhor sua operação pra te mostrar algo que faça sentido pro seu negócio."`,
+NÃO seja robótico com frases longas de script. Seja direto e conversacional:
+- "Legal, {prospectName}. Vi que você se cadastrou. Me conta, como tá a rotina de atendimento aí?"
+- "Prazer, {prospectName}. Vi seu interesse. Qual é o teu negócio hoje?"
+- "Show, {prospectName}. Vi que você quer melhorar o atendimento. Como tá a operação?"
+
+Tom: Casual mas profissional. Uma frase de contexto + uma pergunta aberta. Não pareça telemarketing.`,
   },
   {
     id: 'qualification',
@@ -479,11 +482,18 @@ const conversationRules = {
   ],
   
   // ====== REGRAS DE FALA NATURAL (CRÍTICO PARA TTS) ======
-  // IMPORTANTE: Texto otimizado para síntese de voz - frases fluidas e claras
+  // IMPORTANTE: Texto otimizado para síntese de voz - frases fluidas e claras com RITMO NATURAL
   speechRules: [
-    'Escreva frases COMPLETAS e FLUIDAS que soem naturais quando lidas.',
+    'Escreva frases COMPLETAS e FLUIDAS que soem naturais quando lidas em voz alta.',
     'USE contrações brasileiras naturalmente: "pra", "tá", "né" (mas não force).',
-    'USE vírgulas para pausas naturais.',
+    // ===== RITMO E PAUSAS NATURAIS =====
+    'USE vírgulas estrategicamente para criar PAUSAS NATURAIS entre ideias.',
+    'Estruture frases longas com vírgulas a cada 8-12 palavras para dar ritmo.',
+    'EXEMPLO BOM: "Entendi, isso é bem comum. E quando você recebe muita mensagem, como faz pra dar conta?"',
+    'EXEMPLO RUIM: "Entendi isso é bem comum e quando você recebe muita mensagem como faz pra dar conta?"',
+    'Separe VALIDAÇÃO e PERGUNTA com ponto ou vírgula: "Faz sentido. E como você atende hoje?"',
+    'EVITE frases longas sem pausas - difícil de acompanhar oralmente.',
+    // ===== EVITAR =====
     'EVITE reticências (...) - causam pausas estranhas no áudio.',
     'EVITE exclamações em excesso (!) - um ponto ou interrogação basta.',
     'EVITE fillers isolados como "Ah!", "Nossa!", "Poxa!" no início das frases.',
@@ -494,11 +504,13 @@ const conversationRules = {
   // Exemplos de fala NATURAL vs ARTIFICIAL
   speechExamples: {
     bad: [
+      'Entendi, Oscar. Vi que você se cadastrou e estou aqui pra entender mais sobre sua operação.', // MUITO LONGO e ROTEIRIZADO
       'Entendi, Oscar. Quantas mensagens você recebe?', // mudança brusca de assunto
       'Certo, Oscar. Isso é comum, Oscar.', // nome em excesso
       'Entendi. E você trabalha sozinho? E quantas mensagens?', // duas perguntas seguidas
     ],
     good: [
+      'Legal. Vi que você se cadastrou. Me conta, qual é teu negócio hoje?', // primeira resposta casual
       'Entendi. Isso é bem comum, a gente vê muito isso no mercado.', // valida + comenta
       'Certo. E como você faz quando recebe muita mensagem de uma vez?', // pergunta conectada
       'Faz sentido. Me conta mais sobre essa rotina de atendimento.', // convite aberto
@@ -506,14 +518,15 @@ const conversationRules = {
     ],
   },
   
-  // Exemplos de boas respostas (SEM nome na maioria!)
+  // Exemplos de boas respostas - NATURAIS e CONVERSACIONAIS
   responseExamples: [
-    // COM nome (usar APENAS na primeira resposta após saber o nome)
-    '"Entendi, {name}. Vi que você se cadastrou e estou aqui pra entender mais sobre sua operação."',
+    // COM nome (usar APENAS na primeira resposta - casual, não robótico)
+    '"Legal, {name}. Vi que você se cadastrou. Me conta, qual é teu negócio hoje?"',
+    '"Prazer, {name}. Vi seu interesse. Como tá a operação de atendimento aí?"',
     
     // SEM nome (usar em TODAS as outras respostas)
-    '"Certo. Isso é bem comum, a gente vê muito isso."',
-    '"Entendi. E como você faz quando recebe muita mensagem?"',
+    '"Entendi. Isso é bem comum no mercado."',
+    '"Certo. E como você faz quando recebe muita mensagem?"',
     '"Faz sentido. Me conta mais sobre essa rotina."',
     '"Certo. Sobre a gravação, todas as ligações ficam registradas."',
     '"Entendi. Esse volume já justifica ter uma automação."',
@@ -585,6 +598,21 @@ EVITE (soa artificial):
 ❌ Exclamações em excesso (!!!)
 ❌ Fillers isolados ("Ah!", "Nossa!", "Poxa!")
 ❌ Entusiasmo exagerado em toda frase
+❌ Frases muito longas sem pausas - difícil de acompanhar
+
+RITMO E CADÊNCIA (IMPORTANTE PARA NATURALIDADE):
+- Use VÍRGULAS estrategicamente para criar pausas naturais entre ideias
+- Estruture frases longas com pausas a cada 8-12 palavras
+- Separe VALIDAÇÃO e PERGUNTA com ponto: "Faz sentido. E como você atende hoje?"
+- Uma ideia por vez, de forma clara e pausada
+
+EXEMPLOS DE BOM RITMO:
+✅ "Entendi. Isso é bem comum, a gente vê muito isso no mercado." (pausa na vírgula)
+✅ "Certo. E quando você recebe muita mensagem, como você faz pra dar conta?" (ritmo natural)
+✅ "Sobre a gravação, todas as ligações ficam registradas na plataforma." (vírgula cria respiração)
+
+EXEMPLOS DE RITMO RUIM:
+❌ "Entendi isso é bem comum e quando você recebe muita mensagem como faz pra dar conta" (sem pausas)
 
 USE (soa natural e profissional):
 ✅ "Entendi. Sobre a parte de gravação, todas as ligações ficam registradas."
@@ -610,14 +638,15 @@ REGRA: Use o nome APENAS 1 vez a cada 5-6 respostas (máximo ~15%)
 - Qualquer resposta se já usou nas últimas 4-5 falas
 
 EXEMPLO DE CONVERSA CORRETA:
-1. "Entendi, Oscar. Vi que você se cadastrou..." ← COM nome (primeira vez)
-2. "Certo. Isso é bem comum." ← SEM nome
-3. "Entendi. E você atende sozinho ou tem equipe?" ← SEM nome
-4. "Faz sentido. Esse volume justifica automação." ← SEM nome
+1. "Legal, Oscar. Vi que você se cadastrou. Me conta, qual é teu negócio hoje?" ← COM nome (primeira vez, casual)
+2. "Entendi. Isso é bem comum no mercado." ← SEM nome
+3. "Certo. E você atende sozinho ou tem equipe?" ← SEM nome
+4. "Faz sentido. Esse volume justifica ter uma automação." ← SEM nome
 5. "Certo. Me conta mais sobre essa rotina." ← SEM nome
 
-EXEMPLO ERRADO (robótico):
-1. "Entendi, Oscar." 2. "Certo, Oscar." 3. "Oscar, me conta..." ← MUITO REPETITIVO!
+EXEMPLO ERRADO (robótico/script):
+❌ "Entendi, Oscar. Vi que você se cadastrou com interesse em melhorar seu atendimento..." ← MUITO LONGO e ROTEIRIZADO
+❌ "Entendi, Oscar." "Certo, Oscar." "Oscar, me conta..." ← NOME EM EXCESSO
 
 ═══════════════════════════════════════════════════════════════════════════════
 

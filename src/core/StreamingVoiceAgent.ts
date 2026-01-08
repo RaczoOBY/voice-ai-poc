@@ -36,9 +36,9 @@ import { ThinkingEngine } from './ThinkingEngine';
 
 // Configurações de streaming
 const STREAMING_CONFIG = {
-  MIN_CHARS_FOR_TTS: 15,          // Mínimo de caracteres antes de enviar para TTS
+  MIN_CHARS_FOR_TTS: 80,          // Mínimo de caracteres antes de enviar para TTS (aumentado)
   SENTENCE_DELIMITERS: ['.', '!', '?', ':', ';', ','], // Delimitadores de frase
-  MAX_BUFFER_CHARS: 50,           // Máximo de caracteres no buffer antes de forçar flush
+  MAX_BUFFER_CHARS: 250,          // Máximo de caracteres no buffer antes de forçar flush (aumentado)
 };
 
 interface StreamingVoiceAgentConfig {
@@ -768,8 +768,10 @@ export class StreamingVoiceAgent extends EventEmitter {
     // Delimitadores de sentença/cláusula para dividir texto
     const SENTENCE_DELIMITERS = ['.', '!', '?'];
     const CLAUSE_DELIMITERS = [',', ';', ':'];
-    const MIN_CHARS_FOR_TTS = 40; // Aumentado para evitar buffer underflow (chunks maiores = menos gaps)
-    const MAX_BUFFER_CHARS = 120; // Aumentado para permitir frases mais longas
+    // Chunks MUITO maiores para evitar buffer underflow
+    // O TTS leva ~300-400ms para processar cada chunk, então precisamos de chunks grandes
+    const MIN_CHARS_FOR_TTS = 80; // Aumentado: chunks maiores = menos gaps
+    const MAX_BUFFER_CHARS = 250; // Aumentado: permite 2-3 frases completas
     
     let textBuffer = ''; // Buffer de texto acumulado do LLM
     let chunkIndex = 0;
@@ -777,6 +779,25 @@ export class StreamingVoiceAgent extends EventEmitter {
     // Fila de chunks de texto para processar SEQUENCIALMENTE (evita buffer underflow)
     const textChunkQueue: { text: string; isLast: boolean }[] = [];
     let isProcessingQueue = false;
+    
+    /**
+     * Encontra ponto de corte seguro (não fragmenta palavras)
+     * Procura último espaço ou pontuação antes do limite
+     */
+    const findSafeBreakPoint = (text: string, maxChars: number): number => {
+      if (text.length <= maxChars) return text.length;
+      
+      // Procura último espaço ou pontuação antes do limite
+      let breakPoint = maxChars;
+      for (let i = maxChars - 1; i >= Math.min(maxChars - 30, MIN_CHARS_FOR_TTS); i--) {
+        const char = text[i];
+        if (char === ' ' || SENTENCE_DELIMITERS.includes(char) || CLAUSE_DELIMITERS.includes(char)) {
+          breakPoint = i + 1; // Inclui o espaço/pontuação
+          break;
+        }
+      }
+      return breakPoint;
+    };
     
     // Função para processar a fila de chunks sequencialmente
     const processQueueSequentially = async (): Promise<void> => {
@@ -866,13 +887,24 @@ export class StreamingVoiceAgent extends EventEmitter {
           
           // Enviar para TTS se:
           // 1. Sentença completa com chars suficientes, OU
-          // 2. Buffer cheio (forçar envio)
-          if ((hasSentenceEnd && hasEnoughChars) || bufferFull) {
+          // 2. Buffer cheio (usar ponto de corte seguro para não fragmentar palavras)
+          if (hasSentenceEnd && hasEnoughChars) {
             enqueueTextChunk(trimmedBuffer);
             textBuffer = '';
+          } else if (bufferFull) {
+            // IMPORTANTE: Encontrar ponto de corte seguro para não fragmentar palavras
+            const breakPoint = findSafeBreakPoint(trimmedBuffer, MAX_BUFFER_CHARS);
+            const textToSend = trimmedBuffer.substring(0, breakPoint).trim();
+            const remaining = trimmedBuffer.substring(breakPoint);
+            
+            if (textToSend.length >= MIN_CHARS_FOR_TTS) {
+              enqueueTextChunk(textToSend);
+              textBuffer = remaining;
+            }
           }
-          // Cláusula só envia se buffer está quase cheio
-          else if (hasClauseEnd && trimmedBuffer.length >= MAX_BUFFER_CHARS * 0.7) {
+          // Cláusula só envia se buffer está MUITO cheio (reduz fragmentação)
+          // Aumentado de 0.7 para 0.9 para evitar underflows
+          else if (hasClauseEnd && trimmedBuffer.length >= MAX_BUFFER_CHARS * 0.9) {
             enqueueTextChunk(trimmedBuffer);
             textBuffer = '';
           }
