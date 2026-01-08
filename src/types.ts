@@ -16,6 +16,7 @@ export interface CallSession {
   status: CallStatus;
   conversationHistory: ConversationTurn[];
   metrics: CallMetrics;
+  internalThoughts?: AgentThoughts[]; // Pensamentos internos do agente
 }
 
 export type CallStatus = 
@@ -165,6 +166,7 @@ export interface ElevenLabsConfig {
   stability: number;
   similarityBoost: number;
   style: number;
+  speed?: number;         // 0.7 (mais lento) a 1.5 (mais rápido), padrão 1.0
   outputFormat: string;
 }
 
@@ -283,4 +285,25 @@ export interface IMetricsCollector {
   endTurn(callId: string, turnId: string): TurnMetrics;
   getCallMetrics(callId: string): CallMetrics;
   exportMetrics(callId: string): Promise<void>;
+}
+
+// ============================================
+// INTERNAL REASONING TYPES
+// ============================================
+
+export interface AgentThoughts {
+  timestamp: Date;
+  turnId: string;
+  /** Análise do que o usuário disse (além do literal) */
+  userAnalysis: string;
+  /** Estratégia do agente */
+  strategy: {
+    currentGoal: string;
+    nextSteps: string[];
+    ifUserSays: Array<{ trigger: string; action: string }>;
+  };
+  /** Necessidades detectadas do cliente */
+  detectedNeeds: string[];
+  /** Confiança na direção da conversa (0-1) */
+  confidence: number;
 }

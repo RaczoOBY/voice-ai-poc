@@ -31,7 +31,8 @@ import { ContextualFillerManager } from './ContextualFillerManager';
 import { LatencyAnalyzer } from '../utils/LatencyAnalyzer';
 import { CallRecorder } from '../utils/CallRecorder';
 import { AudioRoom } from '../utils/AudioRoom';
-import { config, generatePhaseContext } from '../config';
+import { config as appConfig, generatePhaseContext } from '../config';
+import { ThinkingEngine } from './ThinkingEngine';
 
 // Configurações de streaming
 const STREAMING_CONFIG = {
@@ -90,6 +91,9 @@ export class StreamingVoiceAgent extends EventEmitter {
   private callRecorder: CallRecorder | null = null;
   private audioRoom: AudioRoom | null = null;
 
+  // Engine de pensamentos internos (opcional - controlado por ENABLE_THINKING_ENGINE)
+  private thinkingEngine: ThinkingEngine | null = null;
+
   constructor(config: StreamingVoiceAgentConfig) {
     super();
     this.config = config;
@@ -115,6 +119,16 @@ export class StreamingVoiceAgent extends EventEmitter {
     } else {
       this.logger.info('📦 Modo STT: Batch (OpenAI Whisper)');
     }
+
+    // Inicializar engine de pensamentos internos (se habilitado)
+    if (appConfig.thinkingEngine.enabled) {
+      this.thinkingEngine = new ThinkingEngine({
+        llm: this.config.llm,
+      });
+      this.logger.info('🧠 ThinkingEngine habilitado (ENABLE_THINKING_ENGINE=true)');
+    } else {
+      this.logger.info('💭 ThinkingEngine desabilitado (ENABLE_THINKING_ENGINE=false)');
+    }
   }
 
   /**
@@ -139,6 +153,7 @@ export class StreamingVoiceAgent extends EventEmitter {
         fillersUsed: 0,
         transcriptionErrors: 0,
       },
+      internalThoughts: [], // Inicializar array de pensamentos internos
     };
 
     this.activeSessions.set(callId, session);
@@ -321,7 +336,7 @@ export class StreamingVoiceAgent extends EventEmitter {
     this.logger.info('📞 Gerando abertura da ligação...');
 
     // Usar prompt de saudação do config
-    const greetingPrompt = config.agent.greetingPrompt
+    const greetingPrompt = appConfig.agent.greetingPrompt
       .replace('{prospectName}', session.prospectName || 'Ainda não coletado - você precisa perguntar')
       .replace('{companyName}', session.companyName || 'Não informada');
 
@@ -923,6 +938,72 @@ export class StreamingVoiceAgent extends EventEmitter {
 
     this.logger.info(`🤖 Resposta: "${fullResponse.substring(0, 80)}${fullResponse.length > 80 ? '...' : ''}"`);
     this.emit('agent:spoke', callId, fullResponse);
+
+    // Disparar processamento de pensamentos em paralelo (não bloqueia)
+    // Aproveita o tempo de reprodução do áudio (~1-3s) enquanto o usuário ouve
+    // Só processa se não for saudação inicial (tem mensagem do usuário) e se ThinkingEngine estiver habilitado
+    if (this.thinkingEngine) {
+      const userMessages = session.conversationHistory.filter(t => t.role === 'user');
+      if (userMessages.length > 0) {
+        this.processThoughtsInParallel(callId, session, fullResponse).catch(err => {
+          this.logger.warn('Erro ao processar pensamentos (não crítico):', err);
+        });
+      }
+    }
+  }
+
+  /**
+   * Processa pensamentos internos em paralelo (não bloqueia)
+   * Executa durante a reprodução do áudio para aproveitar tempo "morto"
+   */
+  private async processThoughtsInParallel(
+    callId: string,
+    session: CallSession,
+    agentResponse: string
+  ): Promise<void> {
+    // Verificar se ThinkingEngine está habilitado
+    if (!this.thinkingEngine) return;
+
+    // Encontrar última mensagem do usuário
+    const userMessages = session.conversationHistory.filter(t => t.role === 'user');
+    const lastUserMessage = userMessages.length > 0 
+      ? userMessages[userMessages.length - 1].content 
+      : '';
+
+    if (!lastUserMessage) {
+      // Não há mensagem do usuário ainda (pode ser saudação inicial)
+      return;
+    }
+
+    const turnId = this.currentMetrics?.turnId || `turn-${Date.now()}`;
+
+    try {
+      const thoughts = await this.thinkingEngine.processThoughts(
+        session,
+        lastUserMessage,
+        agentResponse,
+        turnId
+      );
+
+      if (thoughts) {
+        // Inicializar array se não existir
+        if (!session.internalThoughts) {
+          session.internalThoughts = [];
+        }
+
+        session.internalThoughts.push(thoughts);
+
+        // Registrar no CallRecorder
+        if (this.callRecorder) {
+          this.callRecorder.addThoughts(thoughts);
+        }
+
+        this.logger.debug(`💭 Pensamentos registrados para turno ${turnId}`);
+      }
+    } catch (error) {
+      // Erro não deve interromper o fluxo principal
+      this.logger.warn('Erro ao processar pensamentos (não crítico):', error);
+    }
   }
 
   /**
@@ -954,12 +1035,26 @@ export class StreamingVoiceAgent extends EventEmitter {
       .replace('{companyName}', session.companyName || 'Não informada')
       .replace('{context}', this.generateContext(session));
 
+    // Adicionar pensamentos anteriores ao contexto (últimos 2)
+    if (session.internalThoughts && session.internalThoughts.length > 0) {
+      const recentThoughts = session.internalThoughts.slice(-2);
+      const thoughtsContext = ThinkingEngine.formatThoughtsForContext(recentThoughts);
+      
+      if (thoughtsContext) {
+        systemPrompt += `\n\n═══════════════════════════════════════════════════════════════════════════════
+💭 SEUS PENSAMENTOS ANTERIORES (use para manter coerência no raciocínio):
+═══════════════════════════════════════════════════════════════════════════════
+${thoughtsContext}
+═══════════════════════════════════════════════════════════════════════════════`;
+      }
+    }
+
     const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
       { role: 'system', content: systemPrompt },
     ];
 
     // Adicionar histórico recente (6 para prompt slim, 10 para normal)
-    const historyLimit = config.agent.useSlimPrompt ? -6 : -10;
+    const historyLimit = appConfig.agent.useSlimPrompt ? -6 : -10;
     const recentHistory = session.conversationHistory.slice(historyLimit);
     for (const turn of recentHistory) {
       messages.push({

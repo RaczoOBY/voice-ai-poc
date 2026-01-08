@@ -13,6 +13,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Logger } from './Logger';
 import { config } from '../config';
+import { AgentThoughts } from '../types';
 
 interface TranscriptEntry {
   timestamp: number;
@@ -28,6 +29,7 @@ interface CallRecordingMetadata {
   duration: number;
   turns: number;
   transcript: TranscriptEntry[];
+  internalThoughts?: AgentThoughts[];
   metrics?: {
     averageSTT: number;
     averageLLM: number;
@@ -41,6 +43,7 @@ export class CallRecorder {
   private callId: string;
   private startTime: Date;
   private transcript: TranscriptEntry[] = [];
+  private internalThoughts: AgentThoughts[] = [];
   private isRecording: boolean = false;
   private recordingPath: string;
   private callFolder: string | null = null;
@@ -97,6 +100,15 @@ export class CallRecorder {
   }
 
   /**
+   * Adiciona pensamentos internos do agente
+   */
+  addThoughts(thoughts: AgentThoughts): void {
+    if (!this.isRecording || !config.recording?.saveTranscript) return;
+    
+    this.internalThoughts.push(thoughts);
+  }
+
+  /**
    * Finaliza a gravação e salva transcrições
    */
   async stop(metrics?: CallRecordingMetadata['metrics']): Promise<string | null> {
@@ -123,6 +135,7 @@ export class CallRecorder {
           duration,
           turns: this.transcript.filter(t => t.speaker === 'user').length,
           transcript: this.transcript,
+          internalThoughts: this.internalThoughts.length > 0 ? this.internalThoughts : undefined,
           metrics,
         };
 
@@ -180,6 +193,40 @@ export class CallRecorder {
       lines.push(`[${time}] ${speaker}:`);
       lines.push(`"${entry.text}"`);
       lines.push('');
+    }
+
+    // Adicionar pensamentos internos se existirem
+    if (metadata.internalThoughts && metadata.internalThoughts.length > 0) {
+      lines.push('');
+      lines.push('───────────────────────────────────────────────────────────────');
+      lines.push('💭 PENSAMENTOS INTERNOS DO AGENTE:');
+      lines.push('───────────────────────────────────────────────────────────────');
+      lines.push('');
+
+      for (const thought of metadata.internalThoughts) {
+        const time = this.formatTimestamp(thought.timestamp.getTime() - this.startTime.getTime());
+        lines.push(`[${time}] Turno ${thought.turnId}:`);
+        lines.push(`  Análise: ${thought.userAnalysis}`);
+        lines.push(`  Objetivo: ${thought.strategy.currentGoal}`);
+        
+        if (thought.strategy.nextSteps.length > 0) {
+          lines.push(`  Próximos passos: ${thought.strategy.nextSteps.join(', ')}`);
+        }
+        
+        if (thought.detectedNeeds.length > 0) {
+          lines.push(`  Necessidades detectadas: ${thought.detectedNeeds.join(', ')}`);
+        }
+        
+        if (thought.strategy.ifUserSays.length > 0) {
+          lines.push(`  Contingências:`);
+          thought.strategy.ifUserSays.forEach(c => {
+            lines.push(`    - Se disser "${c.trigger}": ${c.action}`);
+          });
+        }
+        
+        lines.push(`  Confiança: ${(thought.confidence * 100).toFixed(0)}%`);
+        lines.push('');
+      }
     }
 
     lines.push('═══════════════════════════════════════════════════════════════');

@@ -660,8 +660,9 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
   // Configuração do buffer de streaming (para playback a 22050Hz)
   // PRE_BUFFER: acumular este mínimo antes de começar a reproduzir
   // CHUNK_SIZE: tamanho ideal de cada chunk enviado ao speaker
-  private static readonly PRE_BUFFER_MS = 200; // 200ms de buffer inicial
-  private static readonly PRE_BUFFER_BYTES = Math.floor(PLAYBACK_SAMPLE_RATE * 2 * (200 / 1000)); // ~8820 bytes
+  // NOTA: Buffer maior (400ms) reduz buffer underflows entre chunks de TTS
+  private static readonly PRE_BUFFER_MS = 400; // 400ms de buffer inicial (era 200ms)
+  private static readonly PRE_BUFFER_BYTES = Math.floor(PLAYBACK_SAMPLE_RATE * 2 * (400 / 1000)); // ~17640 bytes
   private static readonly DRAIN_INTERVAL_MS = 20; // Drenar buffer a cada 20ms
   private static readonly CHUNK_SIZE = Math.floor(PLAYBACK_SAMPLE_RATE * 2 * (20 / 1000)); // ~882 bytes por 20ms
 
@@ -707,6 +708,9 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
     this.isStreamingStarted = true;
     this.isPlaying = true;
     
+    // Inicializar fade-in para suavizar início do áudio
+    this.fadeInSamplesRemaining = LocalAudioProvider.FADE_IN_SAMPLES;
+    
     // IMPORTANTE: Limpar o buffer de captura quando começamos a reproduzir
     // Isso evita capturar o eco do agente e enviar pro Scribe
     this.playbackAudioBuffer = [];
@@ -741,6 +745,47 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
     this.logger.debug('▶️ Streaming iniciado com buffer de ' + this.streamBufferSize + ' bytes');
   }
 
+  // Contador de silêncio consecutivo (para diagnóstico)
+  private consecutiveSilenceChunks: number = 0;
+  private static readonly SILENCE_WARNING_THRESHOLD = 10; // Avisar após 10 chunks (~200ms) de silêncio
+
+  // Fade-in para suavizar início do áudio (evita "cortada")
+  private fadeInSamplesRemaining: number = 0;
+  private static readonly FADE_IN_MS = 80; // 80ms de fade-in (era 30ms)
+  private static readonly FADE_IN_SAMPLES = Math.floor(PLAYBACK_SAMPLE_RATE * (80 / 1000)); // ~1764 samples
+
+  /**
+   * Aplica fade-in no chunk de áudio (suaviza início)
+   * Usa curva exponencial (ease-in) para transição mais natural
+   */
+  private applyFadeIn(chunk: Buffer): Buffer {
+    if (this.fadeInSamplesRemaining <= 0) {
+      return chunk; // Sem fade-in pendente
+    }
+
+    const samples = chunk.length / 2; // 16-bit = 2 bytes por sample
+    const result = Buffer.alloc(chunk.length);
+    
+    for (let i = 0; i < samples; i++) {
+      const sample = chunk.readInt16LE(i * 2);
+      
+      if (this.fadeInSamplesRemaining > 0) {
+        // Calcular fator de fade (0.0 -> 1.0) com curva exponencial (ease-in)
+        const linearProgress = 1 - (this.fadeInSamplesRemaining / LocalAudioProvider.FADE_IN_SAMPLES);
+        // Curva exponencial: progress^2 - começa devagar e acelera (mais natural pro ouvido)
+        const easedProgress = linearProgress * linearProgress;
+        const fadedSample = Math.round(sample * easedProgress);
+        result.writeInt16LE(fadedSample, i * 2);
+        this.fadeInSamplesRemaining--;
+      } else {
+        // Fade-in completo, copiar sample sem modificar
+        result.writeInt16LE(sample, i * 2);
+      }
+    }
+    
+    return result;
+  }
+
   /**
    * Drena o buffer de streaming, preenchendo com silêncio se necessário
    */
@@ -753,12 +798,31 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
     
     if (this.streamBufferSize > 0) {
       // Temos dados no buffer - enviar
-      const chunk = this.getFromStreamBuffer(targetBytes);
+      let chunk = this.getFromStreamBuffer(targetBytes);
+      
+      // Aplicar fade-in se necessário (suaviza início do áudio)
+      if (this.fadeInSamplesRemaining > 0) {
+        chunk = this.applyFadeIn(chunk);
+      }
+      
       this.currentSpeaker.write(chunk);
+      
+      // Reset contador de silêncio
+      if (this.consecutiveSilenceChunks > 0) {
+        this.logger.debug(`🔊 Buffer preenchido após ${this.consecutiveSilenceChunks * LocalAudioProvider.DRAIN_INTERVAL_MS}ms de silêncio`);
+        this.consecutiveSilenceChunks = 0;
+      }
     } else {
       // Sem dados - enviar silêncio para evitar underflow
       const silence = Buffer.alloc(targetBytes, 0);
       this.currentSpeaker.write(silence);
+      
+      this.consecutiveSilenceChunks++;
+      
+      // Avisar se estamos enviando muito silêncio (possível problema de TTS)
+      if (this.consecutiveSilenceChunks === LocalAudioProvider.SILENCE_WARNING_THRESHOLD) {
+        this.logger.warn(`⚠️ Buffer vazio por ${this.consecutiveSilenceChunks * LocalAudioProvider.DRAIN_INTERVAL_MS}ms - aguardando TTS`);
+      }
     }
   }
 
@@ -807,6 +871,8 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
     this.streamBuffer = [];
     this.streamBufferSize = 0;
     this.isStreamingStarted = false;
+    this.consecutiveSilenceChunks = 0; // Reset contador de silêncio
+    this.fadeInSamplesRemaining = 0; // Reset fade-in para próxima reprodução
   }
 
   /**

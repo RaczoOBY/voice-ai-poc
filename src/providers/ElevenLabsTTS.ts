@@ -48,6 +48,7 @@ export class ElevenLabsTTS implements ITTS {
             similarityBoost: this.config.similarityBoost,
             style: this.config.style,
             useSpeakerBoost: true,
+            speed: this.config.speed ?? 1.0, // Velocidade da fala (0.7-1.5)
           },
         }
       );
@@ -161,6 +162,7 @@ export class ElevenLabsTTS implements ITTS {
             similarityBoost: this.config.similarityBoost,
             style: this.config.style,
             useSpeakerBoost: true,
+            speed: this.config.speed ?? 1.0, // Velocidade da fala (0.7-1.5)
           },
         }
       );
