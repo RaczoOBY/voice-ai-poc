@@ -768,8 +768,8 @@ export class StreamingVoiceAgent extends EventEmitter {
     // Delimitadores de sentença/cláusula para dividir texto
     const SENTENCE_DELIMITERS = ['.', '!', '?'];
     const CLAUSE_DELIMITERS = [',', ';', ':'];
-    const MIN_CHARS_FOR_TTS = 20; // Mínimo de caracteres antes de enviar para TTS (aumentado para evitar fragmentação)
-    const MAX_BUFFER_CHARS = 80; // Máximo de caracteres antes de forçar envio
+    const MIN_CHARS_FOR_TTS = 40; // Aumentado para evitar buffer underflow (chunks maiores = menos gaps)
+    const MAX_BUFFER_CHARS = 120; // Aumentado para permitir frases mais longas
     
     let textBuffer = ''; // Buffer de texto acumulado do LLM
     let chunkIndex = 0;
