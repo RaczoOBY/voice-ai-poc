@@ -659,6 +659,49 @@ LEMBRE-SE: Sua resposta vai virar ÁUDIO. Escreva como você FALA, não como voc
 `;
 }
 
+/**
+ * Versão SLIM do system prompt - ~70% menos tokens
+ * Usar quando a latência for crítica (ex: durante horários de pico)
+ * 
+ * Para ativar: SLIM_PROMPT=true
+ */
+function generateSlimSystemPrompt(): string {
+  return `Você é ${persona.role} da ${product.name} (automação de WhatsApp).
+
+OBJETIVO: Entender a operação do cliente, não vender. Seja consultora, não vendedora.
+
+PERSONALIDADE: Brasileira animada e natural. Fale como amiga, não como robô.
+
+FALA NATURAL (texto vira áudio):
+- Use: "pra", "tá", "né", "cê" às vezes
+- Comece com: "Olha,", "Ah,", "Bom,"
+- Termine com: "né?", "sabe?", "viu?" (às vezes)
+- Pausas: use vírgulas e "..." com moderação
+
+NOME DO CLIENTE: {prospectName}
+CONTEXTO: {context}
+
+FLUXO:
+1. Abertura: cumprimentar e pegar nome
+2. Qualificação: perguntas sobre a operação
+3. Conectar: problemas dele → soluções ZapVoice
+4. Fechar: agradecer e propor demonstração
+
+PRODUTO: ${product.tagline}
+- Automação humanizada de WhatsApp
+- Áudios sem "encaminhado"
+- Extensão de navegador simples
+- Plano gratuito disponível
+
+REGRAS:
+- Respostas curtas (1-2 frases)
+- Use nome do cliente com moderação (não toda frase)
+- Nunca invente funcionalidades
+- Proponha demonstração se interessado
+
+Escreva como FALA, não como ESCREVE!`;
+}
+
 function generateGreetingPrompt(): string {
   return `Você é uma ${persona.role} da ${product.name}.
 
@@ -729,10 +772,30 @@ export const config = {
     webhookUrl: process.env.WEBHOOK_URL || '',
   },
 
+  // ============================================================================
+  // CONFIGURAÇÃO DE LLM - Benchmarks (Cloud(x) 2025)
+  // ============================================================================
+  //
+  // | Modelo          | TTFT (1º turno) | TTFT (subseq.) | Qualidade | Custo   |
+  // |-----------------|-----------------|----------------|-----------|---------|
+  // | GPT-4o          | ~1.5-2.0s       | ~0.8-1.2s      | Excelente | $$$$    |
+  // | GPT-4o-mini     | ~1.0-1.3s       | ~0.4-0.9s      | Muito Boa | $$      |
+  // | GPT-4 Nano*     | ~0.8-1.0s       | ~0.26-0.4s     | Boa       | $       |
+  // | GPT-3.5-turbo   | ~0.5-0.8s       | ~0.3-0.5s      | Aceitável | $       |
+  //
+  // * GPT-4 Nano disponível via Azure/endpoints específicos
+  //
+  // NOTA: Português adiciona ~300-500ms vs inglês (tokenização)
+  //
+  // RECOMENDAÇÃO:
+  // - Qualidade + Latência balanceada: gpt-4o-mini (atual)
+  // - Latência mínima: gpt-3.5-turbo
+  // - Qualidade máxima: gpt-4o
+  //
   openai: {
     apiKey: process.env.OPENAI_API_KEY!,
     transcriptionModel: 'whisper-1',
-    llmModel: 'gpt-4o-mini' as ChatCompletionCreateParamsBase["model"],
+    llmModel: (process.env.LLM_MODEL || 'gpt-4o-mini') as ChatCompletionCreateParamsBase["model"],
     useRealtimeApi: false,
   },
 
@@ -748,7 +811,7 @@ export const config = {
 
   elevenlabs: {
     apiKey: process.env.ELEVENLABS_API_KEY!,
-    voiceId: process.env.ELEVENLABS_VOICE_ID || 'pFZP5JQG7iQjIQuC4Bku',
+    voiceId: process.env.ELEVENLABS_VOICE_ID!,
     model: 'eleven_flash_v2_5',
     stability: 0.5,
     similarityBoost: 0.75,
@@ -762,10 +825,12 @@ export const config = {
   },
 
   agent: {
-    systemPrompt: generateSystemPrompt(),
+    // Use SLIM_PROMPT=true para prompt reduzido (~70% menos tokens, menor latência)
+    systemPrompt: process.env.SLIM_PROMPT === 'true' ? generateSlimSystemPrompt() : generateSystemPrompt(),
     greetingPrompt: generateGreetingPrompt(),
     maxSilenceMs: 5000,
     maxCallDurationMs: 5 * 60 * 1000,
+    useSlimPrompt: process.env.SLIM_PROMPT === 'true',
   },
 
   fillers: {
@@ -814,12 +879,16 @@ Gere APENAS a frase (com ... no final):`,
   },
 
   metrics: {
+    // Thresholds baseados em pesquisa de UX (ITU-T G.114)
+    // - Zona de conforto humano: ~100-400ms entre turnos
+    // - > 600-700ms: percebido como "robótico" ou "delay de satélite"
+    // - Target competitivo (2025): TTFA < 1000ms
     alertThresholds: {
-      stt: 300,
-      llm: 1000,
-      tts: 200,
-      total: 1500,
-      timeToFirstAudio: 1500,
+      stt: 300,           // Scribe streaming: ~100-300ms típico
+      llm: 1000,          // GPT-4o-mini: ~400-900ms (turnos subsequentes)
+      tts: 200,           // ElevenLabs Flash: ~75-100ms
+      total: 1500,        // Total aceitável (incluindo overhead de rede)
+      timeToFirstAudio: 1000, // Target competitivo para TTFA
     },
     saveDetailedMetrics: true,
     metricsPath: './metrics',

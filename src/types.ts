@@ -189,7 +189,10 @@ export type FillerCategory =
   | 'generic'
   | 'withName'
   | 'transition'
-  | 'clarification';
+  | 'clarification'
+  | 'empathy'
+  | 'greeting'
+  | 'farewell';
 
 export interface FillerContext {
   prospectName?: string;

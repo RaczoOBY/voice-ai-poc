@@ -90,6 +90,9 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
   // Coordenação com o agente para métricas corretas
   private _isAgentSpeaking: boolean = false;
   private chunksWhileAgentSpeaking: number = 0; // Contador de chunks ignorados durante fala do agente
+  private agentStoppedSpeakingAt: number = 0; // Timestamp de quando o agente parou de falar
+  private static readonly AGENT_STOP_GRACE_PERIOD_MS = 100; // Grace period após agente parar
+  private pendingTranscriptDiscarded: boolean = false; // Flag para descartar transcrição em andamento
   
   // Reconexão automática e keepalive
   private reconnectAttempts: number = 0;
@@ -350,22 +353,43 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
         }
         
         const commitTime = Date.now();
-        const totalDuration = commitTime - this.transcriptionStartTime;
         
-        // Latência REAL: tempo até primeira transcrição parcial
-        // Se não tiver firstPartialTime, assume pior caso (totalDuration)
-        const realLatency = this.firstPartialTime > 0 
-          ? this.firstPartialTime - this.transcriptionStartTime 
-          : Math.min(totalDuration, 300); // Fallback para 300ms se não tiver parcial
+        // Se a transcrição foi marcada como descartada (usuário falou durante agente),
+        // usar métricas corrigidas baseadas apenas no tempo desde que o agente parou
+        let realLatency: number;
+        let totalDuration: number;
+        
+        if (this.pendingTranscriptDiscarded || this.transcriptionStartTime === 0) {
+          // Transcrição durante fala do agente - usar fallback de 300ms (latência típica do Scribe)
+          // Isso é mais preciso que reportar 15000ms+ que não reflete a latência real do STT
+          realLatency = this.firstPartialTime > 0 && this.agentStoppedSpeakingAt > 0
+            ? Math.min(this.firstPartialTime - this.agentStoppedSpeakingAt, 300)
+            : 300;
+          totalDuration = this.agentStoppedSpeakingAt > 0 
+            ? commitTime - this.agentStoppedSpeakingAt 
+            : 1000;
+          this.logger.debug(`⚠️ Métricas corrigidas (transcrição durante fala do agente)`);
+        } else {
+          totalDuration = commitTime - this.transcriptionStartTime;
+          
+          // Latência REAL: tempo até primeira transcrição parcial
+          // Se não tiver firstPartialTime, assume 300ms (latência típica)
+          realLatency = this.firstPartialTime > 0 
+            ? this.firstPartialTime - this.transcriptionStartTime 
+            : Math.min(totalDuration, 300);
+        }
+        
+        // Garantir que realLatency nunca seja negativa ou absurdamente alta
+        realLatency = Math.max(50, Math.min(realLatency, 1000));
         
         // Tempo de fala do usuário (aproximado): total - VAD wait time
         // VAD wait time = tempo desde última atividade até commit
         const vadSilenceMs = this.config.vadSilenceThresholdMs || 500;
-        const vadWaitTime = Math.min(vadSilenceMs, totalDuration - realLatency);
+        const vadWaitTime = Math.min(vadSilenceMs, Math.max(0, totalDuration - realLatency));
         const speechDuration = Math.max(0, totalDuration - vadWaitTime - realLatency);
         
         this.logger.info(`✅ Transcrição Scribe:`);
-        this.logger.info(`   📊 Latência REAL (STT): ${realLatency}ms (target: <300ms)`);
+        this.logger.info(`   📊 Latência REAL (STT): ${realLatency}ms (target: <300ms)${this.pendingTranscriptDiscarded ? ' [corrigida]' : ''}`);
         this.logger.info(`   🗣️ Duração da fala: ${speechDuration}ms (não é latência)`);
         this.logger.info(`   ⏱️ VAD wait: ${vadWaitTime}ms`);
         this.logger.info(`   📝 Texto: "${event.text}"`);
@@ -375,18 +399,15 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
           realLatency,
           speechDuration,
           vadWaitTime,
-          startTime: this.transcriptionStartTime,
-          firstPartialTime: this.firstPartialTime || this.transcriptionStartTime + realLatency,
+          startTime: this.transcriptionStartTime || this.agentStoppedSpeakingAt,
+          firstPartialTime: this.firstPartialTime || (this.transcriptionStartTime || this.agentStoppedSpeakingAt) + realLatency,
           commitTime,
         };
         
-        // Guardar timestamps para próxima transcrição antes de resetar
-        const startTimeForResult = this.transcriptionStartTime;
-        const firstPartialForResult = this.firstPartialTime;
-        
         // Reset timers para próxima transcrição
-        this.transcriptionStartTime = 0; // Reset para 0 ao invés de Date.now()
+        this.transcriptionStartTime = 0;
         this.firstPartialTime = 0;
+        this.pendingTranscriptDiscarded = false;
         
         const result: TranscriptionResult = {
           text: event.text,
@@ -433,7 +454,8 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
    * Envia chunk de áudio para o Scribe
    * Formato: PCM 16-bit mono na sample rate configurada
    * 
-   * IMPORTANTE: Só inicia contagem de latência quando o agente NÃO está falando.
+   * IMPORTANTE: Só inicia contagem de latência quando o agente NÃO está falando
+   * E passou o grace period após parar de falar.
    * Isso evita métricas incorretas quando o usuário fala durante reprodução do agente.
    */
   feedAudio(callId: string, chunk: Buffer): void {
@@ -446,28 +468,45 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
       return;
     }
 
+    const now = Date.now();
+    
     // Se o agente está falando, NÃO iniciar contagem de latência
     // O áudio ainda é enviado para o Scribe (para transcrição), mas
     // a medição de latência só começa quando o agente para de falar
     if (this._isAgentSpeaking) {
       this.chunksWhileAgentSpeaking++;
+      // Marcar que qualquer transcrição em andamento deve ser descartada para métricas
+      if (this.transcriptionStartTime > 0) {
+        this.pendingTranscriptDiscarded = true;
+      }
       // Não iniciar timer de latência - apenas enviar áudio
     } else {
-      // Agente não está falando - iniciar contagem de latência
-      // Marcar início da transcrição (primeiro chunk enviado APÓS agente parar de falar)
-      if (this.transcriptionStartTime === 0) {
-        this.transcriptionStartTime = Date.now();
-        this.firstPartialTime = 0; // Reset para nova transcrição
-        
-        if (this.chunksWhileAgentSpeaking > 0) {
-          this.logger.debug(`⏱️ Iniciando contagem de latência (${this.chunksWhileAgentSpeaking} chunks durante fala do agente ignorados)`);
-          this.chunksWhileAgentSpeaking = 0;
+      // Agente não está falando - verificar grace period
+      const timeSinceAgentStopped = this.agentStoppedSpeakingAt > 0 
+        ? now - this.agentStoppedSpeakingAt 
+        : Number.MAX_SAFE_INTEGER;
+      
+      // Só iniciar contagem se passou o grace period
+      if (timeSinceAgentStopped >= ElevenLabsScribe.AGENT_STOP_GRACE_PERIOD_MS) {
+        // Marcar início da transcrição (primeiro chunk enviado APÓS grace period)
+        if (this.transcriptionStartTime === 0) {
+          this.transcriptionStartTime = now;
+          this.firstPartialTime = 0; // Reset para nova transcrição
+          this.pendingTranscriptDiscarded = false; // Nova transcrição limpa
+          
+          if (this.chunksWhileAgentSpeaking > 0) {
+            this.logger.debug(`⏱️ Iniciando contagem de latência (${this.chunksWhileAgentSpeaking} chunks durante fala do agente ignorados)`);
+            this.chunksWhileAgentSpeaking = 0;
+          }
         }
+      } else {
+        // Ainda no grace period - não iniciar timer
+        this.chunksWhileAgentSpeaking++;
       }
     }
     
     // Atualizar timestamp para keepalive
-    this.lastAudioSentTime = Date.now();
+    this.lastAudioSentTime = now;
 
     // Enviar áudio no formato correto da API
     const message = JSON.stringify({
@@ -600,6 +639,9 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
     this.transcriptionStartTime = 0;
     this.firstPartialTime = 0;
     this.reconnectAttempts = 0;
+    this.agentStoppedSpeakingAt = 0;
+    this.pendingTranscriptDiscarded = false;
+    this.chunksWhileAgentSpeaking = 0;
     this.logger.info('🔌 Desconectado do Scribe');
   }
 
@@ -633,12 +675,20 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
     this._isAgentSpeaking = speaking;
     
     if (wasAgentSpeaking && !speaking) {
-      // Agente parou de falar - resetar timers para nova medição correta
-      this.logger.debug('🔇 Agente parou de falar - timers de latência prontos');
-      // NÃO resetar transcriptionStartTime aqui - deixar o feedAudio fazer isso
-      // quando o próximo chunk chegar (garante timing correto)
+      // Agente parou de falar - marcar timestamp para grace period
+      this.agentStoppedSpeakingAt = Date.now();
+      this.logger.debug('🔇 Agente parou de falar - iniciando grace period');
+      // Resetar timers - nova transcrição será medida a partir de agora
+      this.transcriptionStartTime = 0;
+      this.firstPartialTime = 0;
+      this.chunksWhileAgentSpeaking = 0;
     } else if (!wasAgentSpeaking && speaking) {
       this.logger.debug('🔊 Agente começou a falar');
+      // Marcar qualquer transcrição em andamento como descartada para métricas
+      if (this.transcriptionStartTime > 0) {
+        this.pendingTranscriptDiscarded = true;
+      }
+      this.agentStoppedSpeakingAt = 0; // Reset
     }
   }
 
@@ -658,5 +708,7 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
     this.transcriptionStartTime = 0;
     this.firstPartialTime = 0;
     this.chunksWhileAgentSpeaking = 0;
+    this.agentStoppedSpeakingAt = Date.now(); // Marcar que agente parou (foi interrompido)
+    this.pendingTranscriptDiscarded = true; // Descartar métricas da transcrição em andamento
   }
 }

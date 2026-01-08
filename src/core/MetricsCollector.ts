@@ -308,7 +308,7 @@ export class MetricsCollector implements IMetricsCollector {
       recommendations.push('Reduza o tamanho do contexto/histórico');
     } else if (maxComponent === avg.tts && avg.tts > this.thresholds.tts) {
       bottleneck = 'tts';
-      recommendations.push('Considere usar ElevenLabs Flash v2.5 ou Cartesia Sonic');
+      recommendations.push('Verifique a conexão com ElevenLabs ou reduza o texto');
     }
 
     // Calcular rating

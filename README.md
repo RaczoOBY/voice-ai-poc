@@ -249,11 +249,11 @@ class ClaudeLLM implements ILLM {
 }
 ```
 
-### Trocar TTS (ex: para Cartesia)
+### Trocar TTS (ex: para outro provider)
 ```typescript
-class CartesiaTTS implements ITTS {
+class CustomTTS implements ITTS {
   async synthesize(text: string): Promise<TTSResult> {
-    // Implementação Cartesia
+    // Implementação do provider
   }
 }
 ```

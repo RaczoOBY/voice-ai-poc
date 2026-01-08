@@ -702,8 +702,13 @@ export class StreamingVoiceAgent extends EventEmitter {
   }
 
   /**
-   * Gera resposta do LLM e sintetiza TTS com streaming
-   * Usa buffer inteligente para evitar chiados (preenche com silêncio se necessário)
+   * Gera resposta do LLM e sintetiza TTS com streaming REAL
+   * 
+   * FLUXO OTIMIZADO (streaming chunk por chunk):
+   * 1. LLM começa a gerar texto (streaming)
+   * 2. Assim que tiver uma frase/cláusula completa, envia para TTS
+   * 3. TTS sintetiza e envia áudio enquanto LLM continua gerando
+   * 4. Reduz Time to First Audio significativamente
    */
   private async streamLLMToTTS(
     callId: string,
@@ -730,26 +735,9 @@ export class StreamingVoiceAgent extends EventEmitter {
     
     let fullResponse = '';
     let isFirstAudio = true;
+    let llmFirstTokenTime = 0;
 
-    this.logger.info('🤖 Gerando resposta com streaming...');
-    
-    // Gerar texto do LLM - maxTokens reduzido para respostas mais rápidas e concisas
-    // 80 tokens ≈ 2-3 frases curtas, ideal para conversação natural
-    const response = await this.config.llm.generate(messages, { maxTokens: 80 });
-    fullResponse = response.text;
-    
-    this.currentMetrics.llmFirstToken = Date.now();
-    const llmDuration = this.currentMetrics.llmFirstToken - this.currentMetrics.llmStart;
-    this.logger.info(`✅ LLM (${llmDuration}ms): "${fullResponse.substring(0, 50)}..."`);
-
-    // Checar se foi interrompido
-    if (this.currentMetrics?.interrupted) {
-      return;
-    }
-
-    // Sintetizar com streaming
-    this.currentMetrics.ttsStart = Date.now();
-    this.logger.info('🔊 Sintetizando com streaming...');
+    this.logger.info('🤖 Gerando resposta com streaming REAL...');
     
     // Resetar estado de interrupção para permitir nova reprodução
     this.currentMetrics.interrupted = false;
@@ -761,35 +749,151 @@ export class StreamingVoiceAgent extends EventEmitter {
       scribe.setAgentSpeaking(true);
     }
     
-    try {
-      if (!this.config.tts.synthesizeStream) {
-        throw new Error('TTS não suporta streaming');
+    // ===== STREAMING REAL: LLM → TTS chunk por chunk =====
+    // Delimitadores de sentença/cláusula para dividir texto
+    const SENTENCE_DELIMITERS = ['.', '!', '?'];
+    const CLAUSE_DELIMITERS = [',', ';', ':'];
+    const MIN_CHARS_FOR_TTS = 20; // Mínimo de caracteres antes de enviar para TTS (aumentado para evitar fragmentação)
+    const MAX_BUFFER_CHARS = 80; // Máximo de caracteres antes de forçar envio
+    
+    let textBuffer = ''; // Buffer de texto acumulado do LLM
+    let chunkIndex = 0;
+    
+    // Fila de chunks de texto para processar SEQUENCIALMENTE (evita buffer underflow)
+    const textChunkQueue: { text: string; isLast: boolean }[] = [];
+    let isProcessingQueue = false;
+    
+    // Função para processar a fila de chunks sequencialmente
+    const processQueueSequentially = async (): Promise<void> => {
+      if (isProcessingQueue) return; // Já está processando
+      isProcessingQueue = true;
+      
+      while (textChunkQueue.length > 0) {
+        const item = textChunkQueue.shift()!;
+        await processTextChunk(item.text, item.isLast);
       }
-      await this.config.tts.synthesizeStream(fullResponse, async (audioChunk: Buffer) => {
-        if (this.currentMetrics?.interrupted) return;
-
-        if (isFirstAudio) {
-          this.currentMetrics!.ttsFirstChunk = Date.now();
-          this.currentMetrics!.playbackStart = Date.now();
-          
-          const timeToFirstAudio = this.currentMetrics!.ttsFirstChunk - this.currentMetrics!.llmStart;
-          this.logger.info(`⚡ Time to First Audio: ${timeToFirstAudio}ms`);
-          isFirstAudio = false;
+      
+      isProcessingQueue = false;
+    };
+    
+    // Função para processar um chunk de texto no TTS
+    const processTextChunk = async (text: string, isLast: boolean = false): Promise<void> => {
+      if (!text.trim() || this.currentMetrics?.interrupted) return;
+      
+      const idx = chunkIndex++;
+      this.logger.debug(`📝 TTS chunk ${idx}: "${text.substring(0, 30)}..."`);
+      
+      if (idx === 0) {
+        this.currentMetrics!.ttsStart = Date.now();
+      }
+      
+      try {
+        if (!this.config.tts.synthesizeStream) {
+          throw new Error('TTS não suporta streaming');
         }
+        
+        await this.config.tts.synthesizeStream(text, async (audioChunk: Buffer) => {
+          if (this.currentMetrics?.interrupted) return;
 
-        // Gravar áudio do agente no AudioRoom (mixer em tempo real)
-        if (this.audioRoom) {
-          this.audioRoom.feedAgentAudio(audioChunk);
-        }
+          if (isFirstAudio) {
+            this.currentMetrics!.ttsFirstChunk = Date.now();
+            this.currentMetrics!.playbackStart = Date.now();
+            
+            const timeToFirstAudio = this.currentMetrics!.ttsFirstChunk - this.currentMetrics!.sttEnd;
+            this.logger.info(`⚡ Time to First Audio: ${timeToFirstAudio}ms (LLM: ${llmFirstTokenTime - this.currentMetrics!.llmStart}ms)`);
+            isFirstAudio = false;
+          }
 
-        // Enviar para buffer de streaming (com preenchimento de silêncio se necessário)
-        await this.config.localProvider.sendAudioStream(callId, audioChunk);
+          // Gravar áudio do agente no AudioRoom
+          if (this.audioRoom) {
+            this.audioRoom.feedAgentAudio(audioChunk);
+          }
+
+          // Enviar para buffer de streaming
+          await this.config.localProvider.sendAudioStream(callId, audioChunk);
+        });
+      } catch (error) {
+        this.logger.error(`Erro no TTS chunk ${idx}:`, error);
+      }
+    };
+    
+    // Adicionar chunk à fila e processar
+    const enqueueTextChunk = (text: string, isLast: boolean = false): void => {
+      textChunkQueue.push({ text, isLast });
+      // Iniciar processamento se não estiver rodando
+      processQueueSequentially().catch(err => {
+        this.logger.error('Erro ao processar fila TTS:', err);
       });
-    } catch (error) {
-      this.logger.error('Erro no TTS streaming:', error);
-      // Fallback para batch
-      const ttsResult = await this.config.tts.synthesize(fullResponse);
-      await this.config.localProvider.sendAudio(callId, ttsResult.audioBuffer);
+    };
+    
+    // Usar LLM com streaming real
+    if (this.config.llm.generateStream) {
+      try {
+        const response = await this.config.llm.generateStream(messages, (chunk: string) => {
+          if (this.currentMetrics?.interrupted) return;
+          
+          // Marcar primeiro token
+          if (llmFirstTokenTime === 0) {
+            llmFirstTokenTime = Date.now();
+            this.currentMetrics!.llmFirstToken = llmFirstTokenTime;
+          }
+          
+          fullResponse += chunk;
+          textBuffer += chunk;
+          
+          // Verificar se temos uma sentença completa (prioridade) ou cláusula
+          const trimmedBuffer = textBuffer.trim();
+          const lastChar = trimmedBuffer.slice(-1);
+          const hasSentenceEnd = SENTENCE_DELIMITERS.includes(lastChar);
+          const hasClauseEnd = CLAUSE_DELIMITERS.includes(lastChar);
+          const hasEnoughChars = trimmedBuffer.length >= MIN_CHARS_FOR_TTS;
+          const bufferFull = trimmedBuffer.length >= MAX_BUFFER_CHARS;
+          
+          // Enviar para TTS se:
+          // 1. Sentença completa com chars suficientes, OU
+          // 2. Buffer cheio (forçar envio)
+          if ((hasSentenceEnd && hasEnoughChars) || bufferFull) {
+            enqueueTextChunk(trimmedBuffer);
+            textBuffer = '';
+          }
+          // Cláusula só envia se buffer está quase cheio
+          else if (hasClauseEnd && trimmedBuffer.length >= MAX_BUFFER_CHARS * 0.7) {
+            enqueueTextChunk(trimmedBuffer);
+            textBuffer = '';
+          }
+        });
+        
+        // Processar texto restante no buffer
+        if (textBuffer.trim()) {
+          enqueueTextChunk(textBuffer.trim(), true);
+        }
+        
+        // Aguardar fila de TTS terminar
+        while (textChunkQueue.length > 0 || isProcessingQueue) {
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        
+        const llmDuration = llmFirstTokenTime - this.currentMetrics.llmStart;
+        this.logger.info(`✅ LLM Streaming (${llmDuration}ms first token): "${fullResponse.substring(0, 50)}..."`);
+        
+      } catch (error) {
+        this.logger.warn('Erro no LLM streaming, usando fallback batch:', error);
+        // Fallback para modo batch
+        const response = await this.config.llm.generate(messages, { maxTokens: 80 });
+        fullResponse = response.text;
+        this.currentMetrics.llmFirstToken = Date.now();
+        await processTextChunk(fullResponse, true);
+      }
+    } else {
+      // Fallback: LLM não suporta streaming
+      const response = await this.config.llm.generate(messages, { maxTokens: 80 });
+      fullResponse = response.text;
+      this.currentMetrics.llmFirstToken = Date.now();
+      
+      const llmDuration = this.currentMetrics.llmFirstToken - this.currentMetrics.llmStart;
+      this.logger.info(`✅ LLM Batch (${llmDuration}ms): "${fullResponse.substring(0, 50)}..."`);
+      
+      await processTextChunk(fullResponse, true);
     }
 
     // Finalizar streaming
@@ -854,8 +958,9 @@ export class StreamingVoiceAgent extends EventEmitter {
       { role: 'system', content: systemPrompt },
     ];
 
-    // Adicionar histórico recente
-    const recentHistory = session.conversationHistory.slice(-10);
+    // Adicionar histórico recente (6 para prompt slim, 10 para normal)
+    const historyLimit = config.agent.useSlimPrompt ? -6 : -10;
+    const recentHistory = session.conversationHistory.slice(historyLimit);
     for (const turn of recentHistory) {
       messages.push({
         role: turn.role === 'agent' ? 'assistant' : 'user',

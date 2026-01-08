@@ -3,6 +3,7 @@
  * 
  * Responsável por:
  * - Pré-gerar áudios de fillers no startup
+ * - Pré-gerar saudações e despedidas comuns
  * - Selecionar filler apropriado baseado no contexto
  * - Personalizar fillers com nome do prospect
  */
@@ -10,6 +11,31 @@
 import { ITTS, IFillerManager, FillerAudio, FillerCategory, FillerContext } from '../types';
 import { config } from '../config';
 import { Logger } from '../utils/Logger';
+
+// Saudações pré-geradas (usar para latência zero na abertura)
+const PREGENERATED_GREETINGS = [
+  'Oi! Tudo bem? Aqui é a Ana da ZapVoice! Com quem eu tô falando?',
+  'E aí, tudo certo? Sou a Marina da ZapVoice... com quem eu falo?',
+  'Opa! Aqui é a Juliana, da ZapVoice. Quem tá falando aí?',
+];
+
+// Despedidas comuns pré-geradas
+const PREGENERATED_FAREWELLS = [
+  'Muito obrigada, viu? Foi ótimo falar com você!',
+  'Valeu demais! Qualquer coisa, me chama!',
+  'Perfeito! Foi um prazer. Até mais!',
+  'Show! Então é isso. Obrigada pelo seu tempo!',
+];
+
+// Fillers de empatia para momentos específicos
+const EMPATHY_FILLERS = [
+  'Faz sentido...',
+  'Ah, entendo...',
+  'Sei como é...',
+  'A gente vê muito isso...',
+  'Pois é...',
+  'Nossa...',
+];
 
 export class FillerManager implements IFillerManager {
   private tts: ITTS;
@@ -19,6 +45,11 @@ export class FillerManager implements IFillerManager {
   private genericFillers: FillerAudio[] = [];
   private transitionFillers: FillerAudio[] = [];
   private clarificationFillers: FillerAudio[] = [];
+  private empathyFillers: FillerAudio[] = [];
+  
+  // Saudações e despedidas pré-geradas (latência zero)
+  private greetings: FillerAudio[] = [];
+  private farewells: FillerAudio[] = [];
   
   // Cache de fillers com nomes (gerados sob demanda)
   private namedFillers: Map<string, FillerAudio[]> = new Map();
@@ -37,33 +68,45 @@ export class FillerManager implements IFillerManager {
    * Isso evita latência de TTS durante a chamada
    */
   async preloadFillers(): Promise<void> {
-    this.logger.info('🔄 Pré-carregando fillers...');
+    this.logger.info('🔄 Pré-carregando fillers, saudações e despedidas...');
     const startTime = Date.now();
 
-    // Carregar fillers genéricos
-    this.genericFillers = await this.generateFillerCategory(
-      config.fillers.generic,
-      'generic'
-    );
-    this.logger.info(`✅ ${this.genericFillers.length} fillers genéricos carregados`);
+    // Carregar em paralelo para maior velocidade
+    const [
+      genericResult,
+      transitionResult,
+      clarificationResult,
+      empathyResult,
+      greetingsResult,
+      farewellsResult,
+    ] = await Promise.all([
+      this.generateFillerCategory(config.fillers.generic, 'generic'),
+      this.generateFillerCategory(config.fillers.transition, 'transition'),
+      this.generateFillerCategory(config.fillers.clarification, 'clarification'),
+      this.generateFillerCategory(EMPATHY_FILLERS, 'empathy'),
+      this.generateFillerCategory(PREGENERATED_GREETINGS, 'greeting'),
+      this.generateFillerCategory(PREGENERATED_FAREWELLS, 'farewell'),
+    ]);
 
-    // Carregar fillers de transição
-    this.transitionFillers = await this.generateFillerCategory(
-      config.fillers.transition,
-      'transition'
-    );
-    this.logger.info(`✅ ${this.transitionFillers.length} fillers de transição carregados`);
+    this.genericFillers = genericResult;
+    this.transitionFillers = transitionResult;
+    this.clarificationFillers = clarificationResult;
+    this.empathyFillers = empathyResult;
+    this.greetings = greetingsResult;
+    this.farewells = farewellsResult;
 
-    // Carregar fillers de clarificação
-    this.clarificationFillers = await this.generateFillerCategory(
-      config.fillers.clarification,
-      'clarification'
-    );
-    this.logger.info(`✅ ${this.clarificationFillers.length} fillers de clarificação carregados`);
+    this.logger.info(`✅ ${this.genericFillers.length} fillers genéricos`);
+    this.logger.info(`✅ ${this.transitionFillers.length} fillers de transição`);
+    this.logger.info(`✅ ${this.clarificationFillers.length} fillers de clarificação`);
+    this.logger.info(`✅ ${this.empathyFillers.length} fillers de empatia`);
+    this.logger.info(`✅ ${this.greetings.length} saudações pré-geradas`);
+    this.logger.info(`✅ ${this.farewells.length} despedidas pré-geradas`);
 
     const duration = Date.now() - startTime;
-    const total = this.genericFillers.length + this.transitionFillers.length + this.clarificationFillers.length;
-    this.logger.info(`🎉 ${total} fillers pré-carregados em ${duration}ms`);
+    const total = this.genericFillers.length + this.transitionFillers.length + 
+                  this.clarificationFillers.length + this.empathyFillers.length +
+                  this.greetings.length + this.farewells.length;
+    this.logger.info(`🎉 ${total} áudios pré-carregados em ${duration}ms`);
   }
 
   /**
@@ -139,6 +182,11 @@ export class FillerManager implements IFillerManager {
       return this.getRandomFiller(this.clarificationFillers);
     }
 
+    // Detectar se usuário expressa frustração ou preocupação (usar empatia)
+    if (this.needsEmpathy(context.lastUserMessage)) {
+      return this.getRandomFiller(this.empathyFillers);
+    }
+
     // Baseado no estágio da conversa
     switch (context.conversationStage) {
       case 'intro':
@@ -148,9 +196,14 @@ export class FillerManager implements IFillerManager {
       case 'qualifying':
       case 'presenting':
         // Durante qualificação/apresentação, alternar entre transição e genéricos
-        return Math.random() > 0.5
-          ? this.getRandomFiller(this.transitionFillers)
-          : this.getRandomFiller(this.genericFillers);
+        // Com 20% de chance de usar empatia para parecer mais humano
+        const rand = Math.random();
+        if (rand < 0.2 && this.empathyFillers.length > 0) {
+          return this.getRandomFiller(this.empathyFillers);
+        } else if (rand < 0.6) {
+          return this.getRandomFiller(this.transitionFillers);
+        }
+        return this.getRandomFiller(this.genericFillers);
       
       case 'closing':
         // No fechamento, usar transições para parecer mais confiante
@@ -159,6 +212,22 @@ export class FillerManager implements IFillerManager {
       default:
         return this.getRandomFiller(this.genericFillers);
     }
+  }
+
+  /**
+   * Detecta se o usuário expressa frustração ou preocupação
+   */
+  private needsEmpathy(message?: string): boolean {
+    if (!message) return false;
+    
+    const normalized = message.toLowerCase();
+    const empathyTriggers = [
+      'difícil', 'problema', 'preocupado', 'complicado', 'frustra',
+      'não funciona', 'não tá funcionando', 'cansado', 'trabalho',
+      'muito trabalho', 'demanda', 'muita coisa', 'não dou conta',
+    ];
+    
+    return empathyTriggers.some(trigger => normalized.includes(trigger));
   }
 
   /**
@@ -217,12 +286,45 @@ export class FillerManager implements IFillerManager {
   }
 
   /**
+   * Retorna uma saudação pré-gerada (latência zero)
+   * Útil para começar a chamada instantaneamente
+   */
+  getPreGeneratedGreeting(): FillerAudio | null {
+    return this.getRandomFiller(this.greetings);
+  }
+
+  /**
+   * Retorna uma despedida pré-gerada (latência zero)
+   */
+  getPreGeneratedFarewell(): FillerAudio | null {
+    return this.getRandomFiller(this.farewells);
+  }
+
+  /**
+   * Retorna um filler de empatia
+   * Usado quando o usuário expressa frustração ou preocupação
+   */
+  getEmpathyFiller(): FillerAudio | null {
+    return this.getRandomFiller(this.empathyFillers);
+  }
+
+  /**
+   * Verifica se há saudações pré-geradas disponíveis
+   */
+  hasPreGeneratedGreetings(): boolean {
+    return this.greetings.length > 0;
+  }
+
+  /**
    * Retorna estatísticas dos fillers carregados
    */
   getStats(): {
     generic: number;
     transition: number;
     clarification: number;
+    empathy: number;
+    greetings: number;
+    farewells: number;
     namedProspects: number;
     totalAudioDuration: number;
   } {
@@ -230,6 +332,9 @@ export class FillerManager implements IFillerManager {
       ...this.genericFillers,
       ...this.transitionFillers,
       ...this.clarificationFillers,
+      ...this.empathyFillers,
+      ...this.greetings,
+      ...this.farewells,
       ...Array.from(this.namedFillers.values()).flat(),
     ];
 
@@ -237,6 +342,9 @@ export class FillerManager implements IFillerManager {
       generic: this.genericFillers.length,
       transition: this.transitionFillers.length,
       clarification: this.clarificationFillers.length,
+      empathy: this.empathyFillers.length,
+      greetings: this.greetings.length,
+      farewells: this.farewells.length,
       namedProspects: this.namedFillers.size,
       totalAudioDuration: allFillers.reduce((sum, f) => sum + f.duration, 0),
     };
