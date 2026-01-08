@@ -735,6 +735,7 @@ export const config = {
   },
 
   fillers: {
+    preloadOnStartup: process.env.FILLERS_PRELOAD_ON_STARTUP === 'true',
     generic: ['Uhum...', 'Hmm...', 'Ah...', 'Tá...', 'Aham...', 'Legal...', 'Sim sim...'],
     withName: ['Tá, {name}...', 'Hmm, {name}...', '{name}...', 'Legal, {name}...', 'Ah, {name}...'],
     transition: ['Olha...', 'Bom...', 'Então...', 'É assim...', 'Deixa eu ver...'],

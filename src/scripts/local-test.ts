@@ -127,11 +127,15 @@ async function main(): Promise<void> {
       logger.info('✅ Scribe aquecido');
     }
 
-    // Inicializar FillerManager e pré-carregar fillers
-    logger.info('🔄 Carregando fillers...');
+    // Inicializar FillerManager e pré-carregar fillers (se configurado)
     const fillerManager = new FillerManager(tts);
-    await fillerManager.preloadFillers();
-    logger.info('✅ Fillers carregados');
+    if (config.fillers.preloadOnStartup) {
+      logger.info('🔄 Pré-carregando fillers...');
+      await fillerManager.preloadFillers();
+      logger.info('✅ Fillers pré-carregados');
+    } else {
+      logger.info('⏭️  Pré-carregamento de fillers desabilitado (config.fillers.preloadOnStartup = false)');
+    }
 
     // Criar agente de streaming
     const agent = new StreamingVoiceAgent({

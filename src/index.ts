@@ -34,7 +34,13 @@ async function main() {
 
   // Inicializar sistema de fillers
   const fillerManager = new FillerManager(tts);
-  await fillerManager.preloadFillers();
+  if (config.fillers.preloadOnStartup) {
+    logger.info('🔄 Pré-carregando fillers...');
+    await fillerManager.preloadFillers();
+    logger.info('✅ Fillers pré-carregados');
+  } else {
+    logger.info('⏭️  Pré-carregamento de fillers desabilitado (config.fillers.preloadOnStartup = false)');
+  }
 
   // Criar agente de voz
   const agent = new VoiceAgent({
