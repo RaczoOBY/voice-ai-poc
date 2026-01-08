@@ -11,11 +11,14 @@
 
 import { EventEmitter } from 'events';
 import { Writable } from 'stream';
+import { ChildProcess, spawn } from 'child_process';
+import * as path from 'path';
 import {
   ITelephonyProvider,
   TelnyxCallEvent,
 } from '../types';
 import { Logger } from '../utils/Logger';
+import { config } from '../config';
 
 // Interface para Speaker
 interface SpeakerOptions {
@@ -112,6 +115,12 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
   // Lock para evitar inicialização múltipla simultânea
   private speakerInitPromise: Promise<void> | null = null;
   private speakerInitialized: boolean = false;
+  
+  // Áudio de fundo (música ambiente)
+  private backgroundMusicProcess: ChildProcess | null = null;
+  private backgroundMusicEnabled: boolean = config.backgroundMusic?.enabled ?? true;
+  private backgroundMusicVolume: number = config.backgroundMusic?.volume ?? 0.12;
+  private backgroundMusicPath: string = path.resolve(process.cwd(), config.backgroundMusic?.filePath ?? 'src/audio/fundo.mp3');
 
   constructor() {
     super();
@@ -192,6 +201,9 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
 
       const audioStream = this.recorder.stream();
       this.isRecording = true;
+      
+      // Iniciar música de fundo
+      this.startBackgroundMusic();
       
       let chunkCount = 0;
       let lastLogTime = Date.now();
@@ -415,11 +427,129 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
     
     this.stopRecording();
     this.stopPlayback();
+    this.stopBackgroundMusic();
     
     this.audioCallbacks.delete(callId);
     this.emitCallEvent('call.hangup', callId);
     
     this.logger.info('✅ Sessão encerrada');
+  }
+
+  /**
+   * Inicia a música de fundo em loop
+   * Usa afplay no macOS com volume baixo
+   */
+  startBackgroundMusic(): void {
+    this.logger.debug(`🎵 startBackgroundMusic chamado - enabled: ${this.backgroundMusicEnabled}`);
+    
+    if (!this.backgroundMusicEnabled) {
+      this.logger.debug('🎵 Música de fundo desabilitada nas configurações');
+      return;
+    }
+
+    if (this.backgroundMusicProcess) {
+      this.logger.debug('🎵 Música de fundo já está tocando');
+      return;
+    }
+
+    try {
+      // Verificar se o arquivo existe
+      const fs = require('fs');
+      this.logger.debug(`🎵 Verificando arquivo: ${this.backgroundMusicPath}`);
+      
+      if (!fs.existsSync(this.backgroundMusicPath)) {
+        this.logger.warn(`⚠️ Arquivo de música de fundo não encontrado: ${this.backgroundMusicPath}`);
+        this.logger.warn(`   CWD: ${process.cwd()}`);
+        return;
+      }
+      
+      this.logger.debug(`🎵 Arquivo encontrado! Iniciando player...`);
+
+      // Detectar SO e usar player apropriado
+      const platform = process.platform;
+      
+      if (platform === 'darwin') {
+        // macOS: usar afplay com volume baixo
+        this.startBackgroundMusicLoop();
+      } else if (platform === 'linux') {
+        this.logger.warn('⚠️ Música de fundo não suportada no Linux ainda');
+      } else {
+        this.logger.warn(`⚠️ Música de fundo não suportada no ${platform}`);
+      }
+    } catch (error) {
+      this.logger.error('❌ Erro ao iniciar música de fundo:', error);
+    }
+  }
+
+  /**
+   * Loop de música de fundo para macOS
+   */
+  private startBackgroundMusicLoop(): void {
+    const playOnce = () => {
+      if (!this.backgroundMusicEnabled) {
+        return;
+      }
+
+      this.logger.debug(`🎵 Tocando: ${this.backgroundMusicPath} (volume: ${this.backgroundMusicVolume})`);
+      
+      // afplay -v volume (0.0 a 1.0)
+      this.backgroundMusicProcess = spawn('afplay', [
+        '-v', this.backgroundMusicVolume.toString(),
+        this.backgroundMusicPath,
+      ]);
+
+      this.backgroundMusicProcess.on('exit', (code, signal) => {
+        this.logger.debug(`🎵 afplay exit: code=${code}, signal=${signal}`);
+        // Se terminou normalmente (code 0), reiniciar para loop
+        if (code === 0 && this.backgroundMusicEnabled) {
+          // Pequeno delay antes de reiniciar
+          setTimeout(() => playOnce(), 100);
+        }
+      });
+
+      this.backgroundMusicProcess.on('error', (err) => {
+        this.logger.error('❌ Erro no player de música de fundo:', err);
+        this.backgroundMusicProcess = null;
+      });
+      
+      // Capturar stderr para debug
+      this.backgroundMusicProcess.stderr?.on('data', (data) => {
+        this.logger.warn(`⚠️ afplay stderr: ${data.toString()}`);
+      });
+    };
+
+    this.logger.info(`🎵 Música de fundo iniciada (volume: ${Math.round(this.backgroundMusicVolume * 100)}%)`);
+    this.logger.info(`   Arquivo: ${this.backgroundMusicPath}`);
+    playOnce();
+  }
+
+  /**
+   * Para a música de fundo
+   */
+  stopBackgroundMusic(): void {
+    if (this.backgroundMusicProcess) {
+      this.backgroundMusicProcess.kill();
+      this.backgroundMusicProcess = null;
+      this.logger.info('🎵 Música de fundo parada');
+    }
+  }
+
+  /**
+   * Habilita/desabilita música de fundo
+   */
+  setBackgroundMusicEnabled(enabled: boolean): void {
+    this.backgroundMusicEnabled = enabled;
+    if (!enabled) {
+      this.stopBackgroundMusic();
+    }
+  }
+
+  /**
+   * Define o volume da música de fundo (0.0 a 1.0)
+   */
+  setBackgroundMusicVolume(volume: number): void {
+    this.backgroundMusicVolume = Math.max(0, Math.min(1, volume));
+    this.logger.info(`🎵 Volume da música de fundo: ${this.backgroundMusicVolume * 100}%`);
   }
 
   /**

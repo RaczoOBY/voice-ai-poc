@@ -39,7 +39,7 @@ export const config = {
     elevenlabs: {
       modelId: 'scribe_v2_realtime',
       sampleRate: 16000,
-      language: 'pt',
+      language: 'pt', // Português
       vadSilenceThresholdMs: 300, // Tempo de silêncio para detectar fim da fala (300ms = 0.3s - balance entre latência e precisão)
     },
   },
@@ -127,6 +127,13 @@ REGRAS IMPORTANTES:
     ],
   },
 
+  // Música de fundo (evita silêncio durante a ligação)
+  backgroundMusic: {
+    enabled: true,                    // Habilitar música de fundo
+    volume: 0.25,                     // Volume (0.0 a 1.0) - 25% para teste
+    filePath: 'src/audio/fundo.mp3',  // Caminho do arquivo de áudio
+  },
+
   // Métricas
   metrics: {
     // Thresholds de alerta (ms) - ajustados para latência REAL
@@ -144,7 +151,7 @@ REGRAS IMPORTANTES:
 
   // Debug
   debug: {
-    logLevel: process.env.LOG_LEVEL || 'info', // 'debug' | 'info' | 'warn' | 'error'
+    logLevel: process.env.LOG_LEVEL || 'debug', // 'debug' | 'info' | 'warn' | 'error' - temporariamente debug
     saveAudioChunks: false, // Salvar chunks de áudio para debug
     audioChunksPath: './debug/audio',
   },

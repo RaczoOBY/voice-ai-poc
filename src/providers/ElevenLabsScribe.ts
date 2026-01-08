@@ -101,7 +101,7 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
     this.config = {
       modelId: 'scribe_v2_realtime',
       sampleRate: 16000,
-      language: 'pt',
+      language: 'pt', // Português
       vadSilenceThresholdMs: 500, // Padrão 500ms (0.5s) - mesmo do test-scribe.ts
       ...config,
     };
