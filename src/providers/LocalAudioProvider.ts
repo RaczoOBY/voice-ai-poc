@@ -114,6 +114,13 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
   private lastPlaybackEndTime: number = 0;
   private static readonly PLAYBACK_COOLDOWN_MS = 100; // Esperar 100ms após parar de tocar (reduzido de 300ms)
   
+  // Buffer circular para capturar áudio durante playback
+  // Guarda os últimos 500ms de áudio para não perder início da fala do usuário
+  private playbackAudioBuffer: Buffer[] = [];
+  private static readonly PLAYBACK_BUFFER_MAX_MS = 500; // Guardar últimos 500ms
+  private static readonly CHUNK_DURATION_MS = 20; // Cada chunk tem ~20ms (320 bytes a 16kHz)
+  private static readonly PLAYBACK_BUFFER_MAX_CHUNKS = Math.ceil(500 / 20); // ~25 chunks
+  
   // Lock para evitar inicialização múltipla simultânea
   private speakerInitPromise: Promise<void> | null = null;
   private speakerInitialized: boolean = false;
@@ -263,7 +270,15 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
       const timeSincePlayback = now - this.lastPlaybackEndTime;
       
       if (this.isPlaying) {
-        // Enquanto está reproduzindo, apenas verificar barge-in, mas NÃO enviar para Scribe
+        // Durante playback: verificar barge-in E guardar áudio no buffer circular
+        // (assim não perdemos o início da fala do usuário)
+        
+        // Adicionar ao buffer circular (mantém últimos 500ms)
+        this.playbackAudioBuffer.push(chunk);
+        while (this.playbackAudioBuffer.length > LocalAudioProvider.PLAYBACK_BUFFER_MAX_CHUNKS) {
+          this.playbackAudioBuffer.shift();
+        }
+        
         const bargeInThreshold = VAD_CONFIG.ENERGY_THRESHOLD * VAD_CONFIG.BARGE_IN_ENERGY_MULTIPLIER;
         
         // Log de debug para monitorar níveis de energia durante playback
@@ -282,7 +297,8 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
             this.playbackInterrupted = true;
             this.bargeInTriggered = true;
             this.emit('playback:interrupted', callId);
-            // Após barge-in, resetar cooldown para começar a escutar imediatamente
+            // Após barge-in, enviar buffer acumulado e resetar cooldown
+            this.flushPlaybackBuffer(callId);
             this.lastPlaybackEndTime = Date.now() - LocalAudioProvider.PLAYBACK_COOLDOWN_MS;
           }
         } else {
@@ -293,13 +309,21 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
           this.consecutiveSpeechFrames = 0;
           this.bargeInTriggered = false;
         }
-        return; // Não enviar para Scribe enquanto está reproduzindo
+        return; // Não enviar para Scribe enquanto está reproduzindo (buffer será enviado depois)
       }
       
       // Se acabou de parar de reproduzir, esperar cooldown antes de enviar para Scribe
       // (exceto se foi barge-in, que já resetou o cooldown)
       if (timeSincePlayback < LocalAudioProvider.PLAYBACK_COOLDOWN_MS) {
+        // Durante cooldown, NÃO adicionar ao buffer (pode ser eco do agente)
         return; // Ainda em cooldown, não enviar
+      }
+      
+      // Limpar buffer quando cooldown termina (não era barge-in, só fim normal)
+      // O buffer só é enviado em caso de barge-in (dentro do bloco isPlaying acima)
+      if (this.playbackAudioBuffer.length > 0) {
+        this.logger.debug(`🗑️ Descartando buffer de playback (${this.playbackAudioBuffer.length} chunks) - não foi barge-in`);
+        this.playbackAudioBuffer = [];
       }
       
       // Agora sim, enviar chunk para o Scribe em tempo real
@@ -682,6 +706,10 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
 
     this.isStreamingStarted = true;
     this.isPlaying = true;
+    
+    // IMPORTANTE: Limpar o buffer de captura quando começamos a reproduzir
+    // Isso evita capturar o eco do agente e enviar pro Scribe
+    this.playbackAudioBuffer = [];
 
     this.currentSpeaker = new this.Speaker({
       channels: CHANNELS,
@@ -842,6 +870,27 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
    */
   onAudioChunk(callId: string, callback: (chunk: Buffer) => void): void {
     this.audioChunkCallbacks.set(callId, callback);
+  }
+
+  /**
+   * Envia todos os chunks acumulados no buffer de playback para o Scribe
+   * Chamado quando o playback termina ou quando há barge-in
+   */
+  private flushPlaybackBuffer(callId: string): void {
+    if (this.playbackAudioBuffer.length === 0) return;
+    
+    const chunkCallback = this.audioChunkCallbacks.get(callId);
+    if (!chunkCallback) return;
+    
+    this.logger.debug(`📤 Enviando buffer de playback: ${this.playbackAudioBuffer.length} chunks (~${this.playbackAudioBuffer.length * LocalAudioProvider.CHUNK_DURATION_MS}ms)`);
+    
+    // Enviar todos os chunks acumulados
+    for (const chunk of this.playbackAudioBuffer) {
+      chunkCallback(chunk);
+    }
+    
+    // Limpar buffer
+    this.playbackAudioBuffer = [];
   }
 
   /**

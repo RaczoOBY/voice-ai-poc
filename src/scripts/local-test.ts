@@ -28,6 +28,7 @@ const logger = new Logger('LocalTest');
 // Cores para o terminal
 const COLORS = {
   reset: '\x1b[0m',
+  red: '\x1b[31m',
   bright: '\x1b[1m',
   dim: '\x1b[2m',
   green: '\x1b[32m',
@@ -188,9 +189,32 @@ async function main(): Promise<void> {
     });
 
     // Handler para CTRL+C
+    let isShuttingDown = false;
     process.on('SIGINT', async () => {
+      if (isShuttingDown) {
+        console.log(`\n${COLORS.yellow}⚠️ Aguarde, salvando gravação...${COLORS.reset}`);
+        return; // Evitar múltiplas execuções
+      }
+      isShuttingDown = true;
+      
       console.log(`\n\n${COLORS.yellow}⏹️  Encerrando sessão...${COLORS.reset}`);
-      await agent.endSession(callId);
+      console.log(`${COLORS.dim}   Aguarde enquanto a gravação é salva...${COLORS.reset}`);
+      
+      try {
+        const summary = await agent.endSession(callId);
+        
+        if (summary) {
+          console.log(`\n${COLORS.green}✅ Sessão encerrada com sucesso!${COLORS.reset}`);
+          console.log(`${COLORS.dim}   Duração: ${Math.round(summary.duration / 1000)}s${COLORS.reset}`);
+          console.log(`${COLORS.dim}   Turnos: ${summary.turns}${COLORS.reset}`);
+        }
+      } catch (error) {
+        console.error(`${COLORS.red}❌ Erro ao encerrar sessão:${COLORS.reset}`, error);
+      }
+      
+      // Delay maior para garantir que a gravação foi salva
+      console.log(`${COLORS.dim}   Finalizando...${COLORS.reset}`);
+      await new Promise(resolve => setTimeout(resolve, 2000));
       process.exit(0);
     });
 

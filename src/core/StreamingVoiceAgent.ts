@@ -29,6 +29,8 @@ import { Logger } from '../utils/Logger';
 import { LocalAudioProvider } from '../providers/LocalAudioProvider';
 import { ContextualFillerManager } from './ContextualFillerManager';
 import { LatencyAnalyzer } from '../utils/LatencyAnalyzer';
+import { CallRecorder } from '../utils/CallRecorder';
+import { config, generatePhaseContext } from '../config';
 
 // Configurações de streaming
 const STREAMING_CONFIG = {
@@ -83,6 +85,9 @@ export class StreamingVoiceAgent extends EventEmitter {
   private prebuiltLLMContext: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> | null = null;
   private partialSentenceComplete: boolean = false; // Indica se detectamos fim de frase na parcial
 
+  // Gravação de chamadas
+  private callRecorder: CallRecorder | null = null;
+
   constructor(config: StreamingVoiceAgentConfig) {
     super();
     this.config = config;
@@ -136,6 +141,10 @@ export class StreamingVoiceAgent extends EventEmitter {
 
     this.activeSessions.set(callId, session);
     
+    // Inicializar gravador de chamadas
+    this.callRecorder = new CallRecorder(callId);
+    this.callRecorder.start();
+    
     // Configurar modo de VAD baseado no tipo de STT
     if (this.useStreamingSTT) {
       // MODO STREAMING (Scribe): VAD externo, chunks enviados diretamente
@@ -159,6 +168,11 @@ export class StreamingVoiceAgent extends EventEmitter {
       
       // Callback para chunks de áudio - envia diretamente para o Scribe
       this.config.localProvider.onAudioChunk(callId, (chunk: Buffer) => {
+        // Gravar áudio do usuário
+        if (this.callRecorder) {
+          this.callRecorder.addUserAudio(chunk);
+        }
+        
         if (!this.isGreetingInProgress) {
           // Verificar se Scribe ainda está conectado antes de enviar
           if (this.config.transcriber.feedAudio) {
@@ -282,28 +296,13 @@ export class StreamingVoiceAgent extends EventEmitter {
 
     this.logger.info('📞 Gerando abertura da ligação...');
 
-    // Saudação inicial: apenas se apresentar e pedir o nome
+    // Usar prompt de saudação do config
+    const greetingPrompt = config.agent.greetingPrompt
+      .replace('{prospectName}', session.prospectName || 'Ainda não coletado - você precisa perguntar')
+      .replace('{companyName}', session.companyName || 'Não informada');
+
     const greetingMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-      {
-        role: 'system',
-        content: `Você é uma vendedora da ZapVoice fazendo uma ligação de prospecção.
-
-FASE ATUAL: Abertura da ligação - você acabou de ligar e precisa:
-1. Se apresentar brevemente como vendedora da ZapVoice
-2. Pedir o nome do cliente de forma educada
-
-IMPORTANTE:
-- Seja breve (máximo 2 frases)
-- Não fale do produto ainda, apenas se apresente e peça o nome
-- Use um tom profissional mas amigável
-- SEMPRE use um nome real para você (exemplos: "Sou a Ana da ZapVoice" ou "Sou a Maria da ZapVoice" ou "Sou a Taís da ZapVoice")
-- NUNCA use placeholders como [seu nome] ou [nome] - sempre use um nome real
-- Exemplo correto: "Olá, boa tarde! Sou a Ana da ZapVoice. Com quem eu estou falando?"
-- Exemplo ERRADO: "Olá, sou a [seu nome] da ZapVoice" - NÃO faça isso!
-
-NOME DO CLIENTE: ${session.prospectName || 'Ainda não coletado - você precisa perguntar'}
-EMPRESA: ${session.companyName || 'Não informada'}`,
-      },
+      { role: 'system', content: greetingPrompt },
     ];
 
     // Gerar saudação com streaming
@@ -610,6 +609,11 @@ EMPRESA: ${session.companyName || 'Não informada'}`,
         content: transcriptText,
         timestamp: new Date(),
       });
+      
+      // Gravar transcrição do usuário
+      if (this.callRecorder) {
+        this.callRecorder.addTranscriptEntry('user', transcriptText);
+      }
 
       // Tentar extrair nome se ainda não tiver coletado
       if (!session.prospectName || session.prospectName === 'Visitante' || session.prospectName.length < 2) {
@@ -743,6 +747,11 @@ EMPRESA: ${session.companyName || 'Não informada'}`,
           isFirstAudio = false;
         }
 
+        // Gravar áudio do agente
+        if (this.callRecorder) {
+          this.callRecorder.addAgentAudio(audioChunk);
+        }
+
         // Enviar para buffer de streaming (com preenchimento de silêncio se necessário)
         await this.config.localProvider.sendAudioStream(callId, audioChunk);
       });
@@ -762,6 +771,11 @@ EMPRESA: ${session.companyName || 'Não informada'}`,
       content: fullResponse,
       timestamp: new Date(),
     });
+    
+    // Gravar transcrição do agente
+    if (this.callRecorder) {
+      this.callRecorder.addTranscriptEntry('agent', fullResponse);
+    }
 
     this.logger.info(`🤖 Resposta: "${fullResponse.substring(0, 80)}${fullResponse.length > 80 ? '...' : ''}"`);
     this.emit('agent:spoke', callId, fullResponse);
@@ -923,28 +937,18 @@ EMPRESA: ${session.companyName || 'Não informada'}`,
 
   /**
    * Gera contexto dinâmico
+   * Usa as fases configuradas em config.conversationPhases
    */
   private generateContext(session: CallSession): string {
     const turnCount = session.conversationHistory.length;
     const duration = Date.now() - session.startedAt.getTime();
-    const hasName = session.prospectName && session.prospectName !== 'Visitante' && session.prospectName.length > 2;
+    const hasName = !!(session.prospectName && session.prospectName !== 'Visitante' && session.prospectName.length > 2);
 
     let context = `Turno ${turnCount + 1}. Duração: ${Math.round(duration / 1000)}s. `;
 
-    // Fases da ligação de vendas
-    if (!hasName) {
-      // FASE 1: Coletar nome
-      context += 'FASE: Coletar nome do cliente - você acabou de se apresentar e precisa descobrir o nome da pessoa. Pergunte educadamente: "Com quem eu estou falando?" ou "Qual seu nome?".';
-    } else if (turnCount <= 2) {
-      // FASE 2: Apresentar produto (após coletar nome)
-      context += `FASE: Apresentação do produto - você já sabe que o cliente se chama ${session.prospectName}. Agora apresente brevemente a ZapVoice e o que fazemos (automação para WhatsApp Business). Seja concisa (2-3 frases).`;
-    } else if (turnCount < 6) {
-      // FASE 3: Qualificar interesse
-      context += 'FASE: Qualificação - descubra se o cliente tem interesse, entenda as necessidades dele e responda perguntas.';
-    } else {
-      // FASE 4: Fechamento
-      context += 'FASE: Fechamento - próximo passo (agendar demonstração, enviar material, etc.) ou encerrar educadamente se não houver interesse.';
-    }
+    // Usa função do config para determinar fase atual
+    const phaseContext = generatePhaseContext(turnCount, hasName, session.prospectName || 'Cliente');
+    context += phaseContext;
 
     return context;
   }
@@ -1052,6 +1056,21 @@ EMPRESA: ${session.companyName || 'Não informada'}`,
       metrics: session.metrics,
       transcript: session.conversationHistory,
     };
+
+    // Salvar gravação da chamada
+    if (this.callRecorder) {
+      const recordingMetrics = {
+        averageSTT: session.metrics.averageLatency.stt,
+        averageLLM: session.metrics.averageLatency.llm,
+        averageTTS: session.metrics.averageLatency.tts,
+        averageTimeToFirstAudio: session.metrics.averageLatency.timeToFirstAudio,
+      };
+      const recordingPath = await this.callRecorder.stop(recordingMetrics);
+      if (recordingPath) {
+        this.logger.info(`📁 Gravação salva em: ${recordingPath}`);
+      }
+      this.callRecorder = null;
+    }
 
     this.activeSessions.delete(callId);
     this.emit('session:ended', callId, summary);

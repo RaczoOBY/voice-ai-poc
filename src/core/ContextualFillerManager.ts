@@ -10,6 +10,7 @@
 
 import { ILLM, ITTS, TTSResult } from '../types';
 import { Logger } from '../utils/Logger';
+import { config } from '../config';
 
 interface ContextualFillerConfig {
   llm: ILLM;
@@ -134,55 +135,22 @@ export class ContextualFillerManager {
   }
 
   /**
-   * Gera filler usando templates pré-definidos (rápido)
+   * Gera filler usando templates do config (rápido)
    */
   private generateFillerWithTemplate(intent: string, text: string): string {
-    const templates: Record<string, string[]> = {
-      price: [
-        'Sobre os valores...',
-        'Quanto aos preços...',
-        'Falando de custo...',
-        'Os valores variam...',
-      ],
-      feature: [
-        'Sobre como funciona...',
-        'Nossa solução permite...',
-        'Basicamente, você pode...',
-        'A plataforma oferece...',
-      ],
-      support: [
-        'Sobre o suporte...',
-        'Temos uma equipe...',
-        'Nosso atendimento...',
-        'Você pode contar com...',
-      ],
-      how: [
-        'É bem simples...',
-        'O processo é...',
-        'Basicamente você...',
-        'Funciona assim...',
-      ],
-      what: [
-        'É uma solução...',
-        'Basicamente é...',
-        'Trata-se de...',
-        'Nossa plataforma...',
-      ],
-      when: [
-        'Quanto ao prazo...',
-        'Sobre o tempo...',
-        'Normalmente...',
-        'Geralmente leva...',
-      ],
-      generic: [
-        'Entendi...',
-        'Sobre isso...',
-        'Bom, vou explicar...',
-        'Deixa eu te contar...',
-      ],
+    // Mapear intenções para chaves do config
+    const intentMap: Record<string, keyof typeof config.fillers.contextual> = {
+      price: 'price',
+      feature: 'features',
+      support: 'support',
+      how: 'features',
+      what: 'generic',
+      when: 'time',
+      generic: 'generic',
     };
 
-    const options = templates[intent] || templates.generic;
+    const contextualKey = intentMap[intent] || 'generic';
+    const options = config.fillers.contextual[contextualKey] || config.fillers.contextual.generic;
     return options[Math.floor(Math.random() * options.length)];
   }
 
@@ -191,24 +159,13 @@ export class ContextualFillerManager {
    */
   private async generateFillerWithLLM(partialText: string, intent: string): Promise<string> {
     try {
-      const prompt = `O usuário começou a falar: "${partialText}"
-
-Gere uma frase curta (máximo 5 palavras) que:
-1. Demonstre que você entendeu a pergunta
-2. Indique que você vai responder
-3. Seja natural e conversacional
-4. NÃO seja uma resposta completa, apenas uma introdução
-
-Exemplos:
-- Se perguntou sobre preço: "Sobre os valores..."
-- Se perguntou como funciona: "É bem simples..."
-- Se perguntou sobre suporte: "Temos uma equipe..."
-
-Gere APENAS a frase, sem aspas, sem explicações:`;
+      // Usar prompts do config
+      const systemPrompt = config.fillers.llmSystemPrompt;
+      const userPrompt = config.fillers.llmUserPromptTemplate.replace('{partialText}', partialText);
 
       const response = await this.config.llm.generate([
-        { role: 'system', content: 'Você é um assistente que gera fillers conversacionais curtos.' },
-        { role: 'user', content: prompt },
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
       ], {
         maxTokens: 20,
         temperature: 0.7,
