@@ -110,6 +110,7 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
   // Confirmação de barge-in (evita falsos positivos)
   private consecutiveSpeechFrames: number = 0;
   private bargeInTriggered: boolean = false;
+  private bargeInDisabled: boolean = false; // Desabilita barge-in durante saudação
   
   // Proteção contra feedback de áudio
   private lastPlaybackEndTime: number = 0;
@@ -292,9 +293,16 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
         // (assim não perdemos o início da fala do usuário)
         
         // Adicionar ao buffer circular (mantém últimos 500ms)
-        this.playbackAudioBuffer.push(chunk);
-        while (this.playbackAudioBuffer.length > LocalAudioProvider.PLAYBACK_BUFFER_MAX_CHUNKS) {
-          this.playbackAudioBuffer.shift();
+        // Mas FILTRAR eco - só adicionar se não for eco e tiver energia
+        // Isso garante que o buffer contenha apenas possível fala do usuário
+        const isNotEcho = !echoAnalysis.isEcho || echoAnalysis.correlation < 0.4;
+        const hasEnergy = energy > VAD_CONFIG.ENERGY_THRESHOLD * 0.5;
+        
+        if (isNotEcho && hasEnergy) {
+          this.playbackAudioBuffer.push(chunk);
+          while (this.playbackAudioBuffer.length > LocalAudioProvider.PLAYBACK_BUFFER_MAX_CHUNKS) {
+            this.playbackAudioBuffer.shift();
+          }
         }
         
         const bargeInThreshold = VAD_CONFIG.ENERGY_THRESHOLD * VAD_CONFIG.BARGE_IN_ENERGY_MULTIPLIER;
@@ -325,7 +333,8 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
           this.consecutiveSpeechFrames++;
           this.logger.debug(`🎤 Barge-in potencial: ${this.consecutiveSpeechFrames}/${VAD_CONFIG.BARGE_IN_CONFIRM_FRAMES} frames (energia ${isVeryHighEnergy ? 'MUITO ALTA' : 'alta'})`);
           
-          if (!this.bargeInTriggered && 
+          // Só dispara barge-in se NÃO estiver desabilitado (ex: durante saudação)
+          if (!this.bargeInTriggered && !this.bargeInDisabled && 
               this.consecutiveSpeechFrames >= VAD_CONFIG.BARGE_IN_CONFIRM_FRAMES) {
             this.logger.info(`🔇 Barge-in confirmado! (energia: ${energy.toFixed(4)}, corr: ${echoAnalysis.correlation.toFixed(3)})`);
             this.stopPlayback();
@@ -335,6 +344,10 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
             // Após barge-in, enviar buffer acumulado (filtrado por eco) e resetar cooldown
             this.flushPlaybackBuffer(callId);
             this.lastPlaybackEndTime = Date.now() - LocalAudioProvider.PLAYBACK_COOLDOWN_MS;
+          } else if (this.bargeInDisabled && this.consecutiveSpeechFrames >= VAD_CONFIG.BARGE_IN_CONFIRM_FRAMES) {
+            // Barge-in seria confirmado, mas está desabilitado (saudação)
+            // Apenas logar - o áudio já está sendo enviado para o Scribe
+            this.logger.debug(`🔇 Barge-in ignorado (saudação) - fala detectada mas playback continua`);
           }
         } else {
           // DECAY GRADUAL em vez de reset imediato
@@ -354,10 +367,13 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
           }
         }
         
-        // NÃO enviar para Scribe durante playback (causa eco no modo local)
-        // O microfone capta o speaker, então enviar para STT causaria transcrição do eco
-        // Barge-in funciona via VAD de energia + EchoCanceller (detectado acima)
-        // Buffer será enviado após barge-in via flushPlaybackBuffer()
+        // ENVIAR para Scribe durante playback SE parece ser fala do usuário
+        // Isso permite capturar transcrição durante saudação para combinar depois
+        // Critério: energia alta E não é eco definitivo
+        const chunkCallback = this.audioChunkCallbacks.get(callId);
+        if (chunkCallback && isNotEcho && hasEnergy) {
+          chunkCallback(chunk);
+        }
         return;
       }
       
@@ -449,6 +465,7 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
       // - Não deve ter sido triggered ainda nesta sessão de fala
       if (this.isPlaying && 
           !this.bargeInTriggered && 
+          !this.bargeInDisabled &&
           energy > bargeInThreshold &&
           this.consecutiveSpeechFrames >= VAD_CONFIG.BARGE_IN_CONFIRM_FRAMES) {
         this.logger.info(`🔇 Barge-in confirmado! (${this.consecutiveSpeechFrames} frames, energia: ${energy.toFixed(4)})`);
@@ -723,6 +740,7 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
   private streamBuffer: Buffer[] = [];
   private streamBufferSize: number = 0;
   private isStreamingStarted: boolean = false;
+  private currentPlaybackCallId: string = ''; // CallId do playback atual (para evento playback:ended)
   private streamDrainInterval: NodeJS.Timeout | null = null;
   
   // Configuração do buffer de streaming (para playback a 22050Hz)
@@ -749,6 +767,9 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
    */
   async sendAudioStream(callId: string, audioChunk: Buffer): Promise<void> {
     await this.initAudioModules();
+    
+    // Guardar callId para usar no evento playback:ended
+    this.currentPlaybackCallId = callId;
     
     // Se foi interrompido, ignorar este chunk (mas não bloquear futuros)
     if (this.playbackInterrupted) {
@@ -801,10 +822,24 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
 
     this.currentSpeaker.on('close', () => {
       this.logger.info('🔊 Playback FINALIZADO');
+      const wasInterrupted = this.playbackInterrupted;
+      const playbackCallId = this.currentPlaybackCallId;
+      
+      // NÃO enviar buffer após playback normal no modo local
+      // Motivo: o buffer contém principalmente eco do speaker, não fala do usuário
+      // O buffer só é útil após barge-in (quando sabemos que há fala do usuário)
+      // Limpar o buffer para evitar que eco seja processado depois
+      this.playbackAudioBuffer = [];
+      
       this.isPlaying = false;
       this.lastPlaybackEndTime = Date.now();
       this.currentSpeaker = null;
       this.clearStreamState();
+      
+      // Emitir evento de playback finalizado (se não foi interrupção)
+      if (!wasInterrupted && playbackCallId) {
+        this.emit('playback:ended', playbackCallId);
+      }
     });
 
     this.currentSpeaker.on('error', (error: Error) => {
@@ -951,6 +986,7 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
     this.isStreamingStarted = false;
     this.consecutiveSilenceChunks = 0; // Reset contador de silêncio
     this.fadeInSamplesRemaining = 0; // Reset fade-in para próxima reprodução
+    this.currentPlaybackCallId = ''; // Limpar callId do playback
   }
 
   /**
@@ -972,17 +1008,19 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
     // Finalizar speaker
     if (this.currentSpeaker && this.isPlaying) {
       this.currentSpeaker.end();
-      // lastPlaybackEndTime será atualizado no evento 'close' do speaker
+      // lastPlaybackEndTime e clearStreamState serão chamados no evento 'close' do speaker
     } else if (this.isPlaying) {
       // Se não há speaker mas ainda está marcado como playing, atualizar manualmente
       this.isPlaying = false;
       this.lastPlaybackEndTime = Date.now();
+      this.clearStreamState(); // Só limpar aqui se não houver speaker (não vai ter evento close)
     }
 
     // Notificar EchoCanceller que o playback terminou
     this.echoCanceller.endPlayback();
-
-    this.clearStreamState();
+    
+    // NÃO chamar clearStreamState() aqui - será chamado no evento 'close' do speaker
+    // Isso garante que currentPlaybackCallId esteja disponível quando o speaker fecha
   }
 
   /**
@@ -1096,6 +1134,24 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
    */
   isCurrentlyPlaying(): boolean {
     return this.isPlaying;
+  }
+
+  /**
+   * Habilita ou desabilita detecção de barge-in
+   * Usado durante saudação para não interromper com "Alô?" do usuário
+   */
+  /**
+   * Habilita/desabilita detecção de barge-in
+   * Durante a saudação: desabilitar para não interromper a apresentação
+   * O áudio continua sendo enviado para o Scribe para capturar transcrição
+   */
+  setBargeInEnabled(enabled: boolean): void {
+    this.bargeInDisabled = !enabled;
+    if (!enabled) {
+      this.logger.info(`🔇 Barge-in DESABILITADO (saudação) - fala será capturada mas playback não será interrompido`);
+    } else {
+      this.logger.info(`✅ Barge-in HABILITADO - interrupção normal ativa`);
+    }
   }
 
   /**

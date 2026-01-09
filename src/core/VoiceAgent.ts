@@ -31,6 +31,9 @@ import {
 import { Logger } from '../utils/Logger';
 import { config as globalConfig } from '../config';
 import { VoiceIntelligence } from './VoiceIntelligence';
+import { TurnStateManager } from './TurnStateManager';
+import { EchoFilter } from './EchoFilter';
+import { AcknowledgmentManager } from './AcknowledgmentManager';
 
 // Configurações de streaming LLM → TTS
 const STREAMING_CONFIG = {
@@ -101,6 +104,11 @@ export class VoiceAgent extends EventEmitter {
 
   // Camada de inteligência centralizada (pensamentos, contexto, etc)
   private intelligence: VoiceIntelligence;
+  
+  // Módulos de gerenciamento de estado (compartilhados com StreamingVoiceAgent)
+  private turnState: TurnStateManager;
+  private echoFilter: EchoFilter;
+  private acknowledgmentManager: AcknowledgmentManager;
 
   constructor(config: VoiceAgentConfig) {
     super();
@@ -112,6 +120,16 @@ export class VoiceAgent extends EventEmitter {
       llm: config.llm,
       systemPrompt: config.systemPrompt,
       enableThinking: globalConfig.thinkingEngine?.enabled ?? false,
+    });
+    
+    // Inicializar módulos de gerenciamento de estado
+    this.turnState = new TurnStateManager();
+    this.echoFilter = new EchoFilter();
+    this.acknowledgmentManager = new AcknowledgmentManager(config.tts);
+    
+    // Pré-carregar acknowledgments em background
+    this.acknowledgmentManager.preload().catch(err => {
+      this.logger.warn('Erro ao pré-carregar acknowledgments (não crítico):', err);
     });
   }
 
@@ -381,6 +399,10 @@ export class VoiceAgent extends EventEmitter {
                     transcriptionErrors: 0,
                   },
                 });
+                
+                // Inicializar módulos de gerenciamento de estado para esta chamada
+                this.turnState.initSession(callSid);
+                this.echoFilter.initSession(callSid);
                 
                 // Async: iniciar STT e saudação
                 (async () => {
@@ -875,6 +897,14 @@ export class VoiceAgent extends EventEmitter {
       this.logger.error(`Sessão não encontrada: ${callId}`);
       return;
     }
+    
+    // Filtrar eco do agente e transcrições corrompidas
+    const filteredText = this.echoFilter.filter(userText, callId);
+    if (!filteredText) {
+      this.logger.debug(`🔇 Transcrição filtrada (eco/corrompida): "${userText.substring(0, 30)}..."`);
+      return;
+    }
+    userText = filteredText;
 
     // Verificar se ainda tem áudio tocando do turno anterior (barge-in por transcrição)
     const now = Date.now();
@@ -1248,6 +1278,9 @@ export class VoiceAgent extends EventEmitter {
 
       // Gravar resposta do agente
       this.recordTranscript(callId, 'agent', fullResponse);
+      
+      // Registrar no EchoFilter para detectar eco em transcrições futuras
+      this.echoFilter.registerAgentResponse(fullResponse, callId);
 
       // Adicionar resposta ao histórico
       session.conversationHistory.push({
@@ -1963,29 +1996,16 @@ export class VoiceAgent extends EventEmitter {
    * Paridade com StreamingVoiceAgent
    */
   private async playAcknowledgment(callId: string): Promise<void> {
-    // Verificar cooldown
-    const lastTime = this.lastAcknowledgmentTime.get(callId) || 0;
-    const now = Date.now();
-    if (now - lastTime < VoiceAgent.ACKNOWLEDGMENT_COOLDOWN_MS) {
-      this.logger.debug(`🎵 Acknowledgment em cooldown (${VoiceAgent.ACKNOWLEDGMENT_COOLDOWN_MS - (now - lastTime)}ms restantes)`);
-      return;
-    }
-
-    this.lastAcknowledgmentTime.set(callId, now);
-
     try {
-      const acknowledgments = ['Uhum', 'Hm', 'Tá'];
-      const randomAck = acknowledgments[Math.floor(Math.random() * acknowledgments.length)];
-      
-      this.logger.info(`🎵 Tocando acknowledgment: "${randomAck}"`);
-      
-      // Sintetizar áudio curto do acknowledgment
-      const ttsResult = await this.config.tts.synthesize(randomAck);
+      const ack = await this.acknowledgmentManager.getAcknowledgment(callId);
+      if (!ack) {
+        // Cooldown ou desabilitado
+        return;
+      }
       
       // Enviar áudio sem marcar como reprodução principal
-      await this.sendAudioToCall(callId, ttsResult.audioBuffer);
-      
-      this.logger.debug(`✅ Acknowledgment enviado`);
+      await this.sendAudioToCall(callId, ack.audio);
+      this.logger.debug(`✅ Acknowledgment enviado: "${ack.text}"`);
     } catch (error) {
       this.logger.debug(`Erro ao tocar acknowledgment (não crítico):`, error);
     }
@@ -2016,14 +2036,19 @@ export class VoiceAgent extends EventEmitter {
     this.isGreetingPlaying.delete(callId);
     this.totalAudioBytesSent.delete(callId);
     this.audioPlaybackStartTime.delete(callId);
-    this.pendingBargeInText.delete(callId); // 🆕
+    this.pendingBargeInText.delete(callId);
     this.continuationDetected.delete(callId);
     this.shouldCancelProcessing.delete(callId);
     this.hasStartedPlayback.delete(callId);
     this.lastAcknowledgmentTime.delete(callId);
-    this.audioAccumulationBuffer.delete(callId); // 🆕 Limpar buffer de acumulação
+    this.audioAccumulationBuffer.delete(callId);
     this.lastAudioSentTime.delete(callId);
-    this.greetingTranscription.delete(callId); // 🆕 Limpar transcrição durante saudação
+    this.greetingTranscription.delete(callId);
+    
+    // Limpar módulos de gerenciamento de estado
+    this.turnState.clearSession(callId);
+    this.echoFilter.clearSession(callId);
+    this.acknowledgmentManager.clearSession(callId);
     
     // Cancelar timer de debounce se existir
     const debounceTimer = this.transcriptionDebounceTimer.get(callId);

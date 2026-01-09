@@ -33,6 +33,9 @@ import { CallRecorder } from '../utils/CallRecorder';
 import { AudioRoom } from '../utils/AudioRoom';
 import { config as appConfig } from '../config';
 import { VoiceIntelligence } from './VoiceIntelligence';
+import { TurnStateManager } from './TurnStateManager';
+import { EchoFilter } from './EchoFilter';
+import { AcknowledgmentManager } from './AcknowledgmentManager';
 
 // Configurações de streaming
 const STREAMING_CONFIG = {
@@ -74,6 +77,7 @@ export class StreamingVoiceAgent extends EventEmitter {
   private currentMetrics: StreamingMetrics | null = null;
   private isProcessing: boolean = false;
   private isGreetingInProgress: boolean = false; // Bloqueia processamento durante saudação
+  private greetingTranscription: string = ''; // Buffer para transcrições durante saudação (combinadas com próxima fala)
   private useStreamingSTT: boolean = false; // Usa STT em streaming (Scribe)
   private contextualFillerManager: ContextualFillerManager | null = null; // Fillers contextualizados (desabilitados por enquanto)
   private wasInterrupted: boolean = false; // Flag para indicar que houve barge-in
@@ -109,6 +113,11 @@ export class StreamingVoiceAgent extends EventEmitter {
 
   // Camada de inteligência centralizada (pensamentos, contexto, extração de nome)
   private intelligence: VoiceIntelligence;
+  
+  // Módulos de gerenciamento de estado (compartilhados com VoiceAgent)
+  private turnState: TurnStateManager;
+  private echoFilter: EchoFilter;
+  private acknowledgmentManager: AcknowledgmentManager;
 
   constructor(config: StreamingVoiceAgentConfig) {
     super();
@@ -142,6 +151,11 @@ export class StreamingVoiceAgent extends EventEmitter {
       systemPrompt: this.config.systemPrompt,
       enableThinking: appConfig.thinkingEngine?.enabled ?? false,
     });
+    
+    // Inicializar módulos de gerenciamento de estado
+    this.turnState = new TurnStateManager();
+    this.echoFilter = new EchoFilter();
+    this.acknowledgmentManager = new AcknowledgmentManager(this.config.tts);
   }
 
   /**
@@ -170,6 +184,11 @@ export class StreamingVoiceAgent extends EventEmitter {
     };
 
     this.activeSessions.set(callId, session);
+    
+    // Configurar módulos de estado para modo single-session
+    this.turnState.setSingleSession(callId);
+    this.echoFilter.setSingleSession(callId);
+    this.acknowledgmentManager.setSingleSession(callId);
     
     // Inicializar gravador de chamadas (para transcrições)
     this.callRecorder = new CallRecorder(callId);
@@ -204,29 +223,29 @@ export class StreamingVoiceAgent extends EventEmitter {
       }
       
       // Callback para chunks de áudio - envia diretamente para o Scribe
+      // NOTA: Durante a saudação, o LocalAudioProvider só envia chunks que não são eco
+      // Isso permite capturar a fala do usuário (ex: "Alô?") para combinar com próxima fala
       this.config.localProvider.onAudioChunk(callId, (chunk: Buffer) => {
         // Gravar áudio do usuário no AudioRoom
         if (this.audioRoom) {
           this.audioRoom.feedUserAudio(chunk);
         }
         
-        if (!this.isGreetingInProgress) {
-          // Verificar se Scribe ainda está conectado antes de enviar
-          if (this.config.transcriber.feedAudio) {
-            // Verificar conexão antes de enviar (se método disponível)
-            const scribe = this.config.transcriber as any;
-            if (scribe.isStreamConnected && !scribe.isStreamConnected()) {
-              this.logger.warn('⚠️ Scribe desconectado, tentando reconectar...');
-              // Tentar reconectar em background (não bloquear)
-              this.config.transcriber.startStream!(callId).catch(err => {
-                this.logger.error('Erro ao reconectar Scribe:', err);
-              });
-              return;
-            }
-            this.config.transcriber.feedAudio(callId, chunk);
-          } else {
-            this.logger.warn('⚠️ Scribe feedAudio não disponível - chunks não serão enviados');
+        // Verificar se Scribe ainda está conectado antes de enviar
+        if (this.config.transcriber.feedAudio) {
+          // Verificar conexão antes de enviar (se método disponível)
+          const scribe = this.config.transcriber as any;
+          if (scribe.isStreamConnected && !scribe.isStreamConnected()) {
+            this.logger.warn('⚠️ Scribe desconectado, tentando reconectar...');
+            // Tentar reconectar em background (não bloquear)
+            this.config.transcriber.startStream!(callId).catch(err => {
+              this.logger.error('Erro ao reconectar Scribe:', err);
+            });
+            return;
           }
+          this.config.transcriber.feedAudio(callId, chunk);
+        } else {
+          this.logger.warn('⚠️ Scribe feedAudio não disponível - chunks não serão enviados');
         }
       });
       
@@ -236,7 +255,7 @@ export class StreamingVoiceAgent extends EventEmitter {
         const resultText = result.text.trim();
         
         // PRIMEIRO: Verificar se é eco do agente (ignorar completamente)
-        if (this.isLikelyAgentEcho(resultText)) {
+        if (this.echoFilter.isLikelyAgentEcho(resultText)) {
           this.logger.info(`🔇 Ignorando eco do agente na transcrição final: "${resultText}"`);
           // Resetar flags de cancelamento se estavam setadas
           if (this.shouldCancelProcessing) {
@@ -247,7 +266,7 @@ export class StreamingVoiceAgent extends EventEmitter {
         }
         
         // Verificar se transcrição parece corrompida (eco do agente, onomatopeias)
-        const isLikelyCorrupted = this.isTranscriptionCorrupted(resultText);
+        const isLikelyCorrupted = this.echoFilter.isTranscriptionCorrupted(resultText);
         
         // Se temos transcrição parcial capturada durante playback e resultado parece corrompido
         if (this.partialDuringPlayback && isLikelyCorrupted) {
@@ -296,21 +315,37 @@ export class StreamingVoiceAgent extends EventEmitter {
         // Resetar transcrição parcial (não usada)
         this.partialDuringPlayback = '';
         
-        if (!this.isGreetingInProgress && !this.isProcessing) {
-          this.logger.debug(`📝 Recebida transcrição do Scribe: "${result.text}"`);
-          await this.processTranscription(callId, result);
-        } else if (this.isProcessing) {
+        // Durante a saudação: guardar transcrição para combinar com próxima fala
+        // O "Alô?" do usuário é resposta natural, não deve causar barge-in
+        if (this.isGreetingInProgress) {
+          const existingText = this.greetingTranscription;
+          this.greetingTranscription = existingText ? `${existingText} ${resultText}` : resultText;
+          this.logger.info(`👋 Transcrição durante saudação guardada: "${resultText}" - será combinada com próxima fala`);
+          return;
+        }
+        
+        // Combinar com transcrição guardada durante saudação (se houver)
+        let textToProcess = resultText;
+        if (this.greetingTranscription) {
+          textToProcess = `${this.greetingTranscription} ${resultText}`.trim();
+          this.greetingTranscription = '';
+          this.logger.info(`🔗 Transcrição combinada com saudação: "${textToProcess.substring(0, 50)}..."`);
+        }
+        
+        if (!this.isProcessing) {
+          this.logger.debug(`📝 Recebida transcrição do Scribe: "${textToProcess}"`);
+          const processResult: TranscriptionResult = { ...result, text: textToProcess };
+          await this.processTranscription(callId, processResult);
+        } else {
           // Estamos processando, mas não detectamos continuação via parciais
           // Pode acontecer se a fala foi muito rápida - marcar para reprocessar
-          this.logger.debug(`⚠️ Nova transcrição durante processamento: "${result.text.substring(0, 30)}..."`);
+          this.logger.debug(`⚠️ Nova transcrição durante processamento: "${textToProcess.substring(0, 30)}..."`);
           if (!this.config.localProvider.isCurrentlyPlaying()) {
             // Ainda não começou áudio - marcar para cancelar e reprocessar
             this.shouldCancelProcessing = true;
             this.continuationDetected = true;
             // A próxima transcrição vai combinar
           }
-        } else {
-          this.logger.debug(`⚠️ Transcrição ignorada - greeting: ${this.isGreetingInProgress}`);
         }
       });
       
@@ -337,7 +372,7 @@ export class StreamingVoiceAgent extends EventEmitter {
           const trimmedText = text.trim();
           
           // Filtrar eco do agente (resíduos que podem vazar mesmo com filtro no LocalAudioProvider)
-          if (this.isLikelyAgentEcho(trimmedText)) {
+          if (this.echoFilter.isLikelyAgentEcho(trimmedText)) {
             this.logger.debug(`🔇 Ignorando eco do agente: "${trimmedText.substring(0, 30)}..."`);
             return; // Não processar eco
           }
@@ -348,6 +383,16 @@ export class StreamingVoiceAgent extends EventEmitter {
           if (isNoise) {
             this.logger.debug(`🔇 Ignorando ruído/onomatopeia: "${trimmedText}"`);
             return;
+          }
+          
+          // DURANTE SAUDAÇÃO: Guardar transcrição parcial para usar depois
+          // Não processamos, mas guardamos para o handler de playback:interrupted
+          if (this.isGreetingInProgress && this.config.localProvider.isCurrentlyPlaying() && trimmedText.length > 5) {
+            const isLikelyEcho = /^(oi[,.\s]*)+$/i.test(trimmedText);
+            if (!isLikelyEcho && trimmedText.length > this.partialDuringPlayback.length) {
+              this.partialDuringPlayback = trimmedText;
+              this.logger.info(`👂 Transcrição parcial durante saudação: "${trimmedText.substring(0, 40)}..." (será combinada)`);
+            }
           }
           
           // DETECÇÃO DE CONTINUAÇÃO: Se estamos processando E usuário volta a falar
@@ -423,6 +468,23 @@ export class StreamingVoiceAgent extends EventEmitter {
 
     // Listener para barge-in
     this.config.localProvider.on('playback:interrupted', (interruptedCallId: string) => {
+      // Durante a saudação: guardar transcrição parcial para combinar depois
+      // NÃO processamos imediatamente, mas guardamos para uso posterior
+      if (this.isGreetingInProgress) {
+        // Guardar transcrição parcial (se houver) em greetingTranscription
+        if (this.partialDuringPlayback) {
+          const existingText = this.greetingTranscription;
+          this.greetingTranscription = existingText 
+            ? `${existingText} ${this.partialDuringPlayback}` 
+            : this.partialDuringPlayback;
+          this.logger.info(`👋 Transcrição durante saudação (barge-in) guardada: "${this.partialDuringPlayback}" - será combinada com próxima fala`);
+          this.partialDuringPlayback = '';
+        } else {
+          this.logger.info(`👋 Barge-in durante saudação detectado - aguardando transcrição`);
+        }
+        return;
+      }
+      
       this.wasInterrupted = true;
       this.bargeInTimestamp = Date.now();
       
@@ -430,7 +492,7 @@ export class StreamingVoiceAgent extends EventEmitter {
         this.currentMetrics.interrupted = true;
       }
       
-      // 🆕 Se temos transcrição parcial capturada durante playback, logar
+      // Se temos transcrição parcial capturada durante playback, logar
       if (this.partialDuringPlayback) {
         this.logger.info(`🔇 Barge-in detectado - transcrição parcial capturada: "${this.partialDuringPlayback.substring(0, 50)}..."`);
         // Guardar a transcrição parcial como "pendente" para usar quando vier a completa
@@ -485,20 +547,81 @@ export class StreamingVoiceAgent extends EventEmitter {
     // Iniciar gravação
     await this.config.localProvider.startRecording(callId);
 
-    // 🎵 Pré-carregar áudios de acknowledgment em background (latência zero quando precisar)
-    this.preloadAcknowledgments().catch(err => {
+    // Pré-carregar áudios de acknowledgment em background (latência zero quando precisar)
+    this.acknowledgmentManager.preload().catch(err => {
       this.logger.debug('Erro ao pré-carregar acknowledgments (não crítico):', err);
     });
 
     this.emit('session:started', callId);
     this.logger.info(`✅ Sessão ${callId} iniciada - Fale algo!`);
 
-    // Gerar saudação inicial (bloqueia processamento de áudio)
+    // Gerar saudação inicial
+    // Durante a saudação: DESABILITAR barge-in mas CONTINUAR capturando áudio
+    // O "Alô?" do usuário é resposta natural, não deve interromper a apresentação
+    // Mas queremos capturar essa fala para combinar com a próxima
     this.isGreetingInProgress = true;
+    this.config.localProvider.setBargeInEnabled(false); // Desabilita barge-in durante saudação
+    
     await this.generateGreeting(callId);
+    
+    // Aguardar playback terminar naturalmente (sem interrupção)
+    await this.waitForPlaybackEnd(callId);
+    
+    this.config.localProvider.setBargeInEnabled(true); // Reabilita barge-in após saudação
     this.isGreetingInProgress = false;
+    
+    // Se houve transcrição durante saudação, logar
+    if (this.greetingTranscription) {
+      this.logger.info(`👋 Transcrição guardada durante saudação: "${this.greetingTranscription}" - será combinada com próxima fala`);
+    }
 
     return callId;
+  }
+
+  /**
+   * Aguarda o playback terminar ou ser interrompido
+   * Usado após a saudação para não processar "Alô?" como barge-in
+   */
+  private waitForPlaybackEnd(callId: string): Promise<void> {
+    return new Promise<void>((resolve) => {
+      // Se não está reproduzindo, resolver imediatamente
+      if (!this.config.localProvider.isCurrentlyPlaying()) {
+        resolve();
+        return;
+      }
+
+      const MAX_WAIT_MS = 10000; // Timeout máximo de 10s (segurança)
+      let resolved = false;
+
+      const cleanup = () => {
+        if (!resolved) {
+          resolved = true;
+          this.config.localProvider.off('playback:ended', onEnded);
+          this.config.localProvider.off('playback:interrupted', onInterrupted);
+          resolve();
+        }
+      };
+
+      const onEnded = (endedCallId: string) => {
+        if (endedCallId === callId) {
+          this.logger.info('✅ Saudação finalizada naturalmente');
+          cleanup();
+        }
+      };
+
+      const onInterrupted = (interruptedCallId: string) => {
+        if (interruptedCallId === callId) {
+          this.logger.info('👋 Saudação interrompida pelo usuário');
+          cleanup();
+        }
+      };
+
+      this.config.localProvider.on('playback:ended', onEnded);
+      this.config.localProvider.on('playback:interrupted', onInterrupted);
+
+      // Timeout de segurança
+      setTimeout(cleanup, MAX_WAIT_MS);
+    });
   }
 
   /**
@@ -555,77 +678,7 @@ export class StreamingVoiceAgent extends EventEmitter {
   }
 
   // NOTA: detectConversationStage foi movido para VoiceIntelligence
-
-  /**
-   * Detecta se uma transcrição parece corrompida (eco do agente, onomatopeias repetidas)
-   * Isso acontece quando o Scribe transcreve a fala do agente junto com o usuário
-   */
-  private isTranscriptionCorrupted(text: string): boolean {
-    if (!text || text.length === 0) return true;
-    
-    const normalized = text.toLowerCase().trim();
-    
-    // 1. Muito curta (menos de 5 chars) e não é uma palavra válida
-    if (normalized.length < 5) {
-      // Permitir palavras curtas válidas
-      const validShortWords = ['sim', 'não', 'ok', 'oi', 'olá', 'tá', 'é'];
-      if (!validShortWords.includes(normalized)) {
-        return true;
-      }
-    }
-    
-    // 2. Apenas onomatopeias/interjeições
-    const onomatopeiasPattern = /^(h+[um]+|hum+|uhum+|ah+|eh+|oh+|uh+)[.!?,\s]*$/i;
-    if (onomatopeiasPattern.test(normalized)) {
-      return true;
-    }
-    
-    // 3. Repetições suspeitas (eco do agente dizendo "oi, oi, oi...")
-    const repeatedWordPattern = /^(\w+[,.\s]+)\1{2,}/i;
-    if (repeatedWordPattern.test(normalized)) {
-      return true;
-    }
-    
-    // 4. Muitas repetições de "oi" (padrão comum de eco)
-    const oiCount = (normalized.match(/\boi\b/gi) || []).length;
-    if (oiCount > 3) {
-      return true;
-    }
-    
-    // 5. 🆕 Verificar se é eco do agente (substring do que ele disse)
-    if (this.isLikelyAgentEcho(normalized)) {
-      return true;
-    }
-    
-    return false;
-  }
-
-  /**
-   * Verifica se a transcrição é provavelmente eco do agente
-   * (substring EXATA do que o agente acabou de dizer)
-   * 
-   * IMPORTANTE: Este filtro deve ser conservador!
-   * É normal o usuário usar as mesmas palavras do assunto sendo discutido.
-   * Só filtra se for substring EXATA e significativa (não apenas palavras em comum).
-   */
-  private isLikelyAgentEcho(text: string): boolean {
-    if (!this.lastAgentResponse || text.length < 5) return false;
-    
-    const normalizedText = text.toLowerCase().trim();
-    const normalizedAgent = this.lastAgentResponse.toLowerCase();
-    
-    // Só considera eco se for substring EXATA de pelo menos 10 caracteres
-    // Isso evita falsos positivos com palavras comuns
-    if (normalizedText.length >= 10 && normalizedAgent.includes(normalizedText)) {
-      this.logger.debug(`🔇 Transcrição "${text}" é substring exata do agente`);
-      return true;
-    }
-    
-    // NÃO verificar palavras individuais - muito agressivo!
-    // É normal o usuário falar sobre o mesmo assunto usando palavras em comum.
-    
-    return false;
-  }
+  // NOTA: isTranscriptionCorrupted e isLikelyAgentEcho foram movidos para EchoFilter
 
   /**
    * Pré-processa transcrições parciais para reduzir latência
@@ -675,86 +728,26 @@ export class StreamingVoiceAgent extends EventEmitter {
     this.partialSentenceComplete = false;
   }
 
-  // Cache de áudio para acknowledgments (evita gerar TTS toda vez)
-  private acknowledgmentAudioCache: Map<string, Buffer> = new Map();
-  private lastAcknowledgmentTime: number = 0;
-
-  /**
-   * Pré-carrega áudios de acknowledgment em background
-   * Garante latência zero quando precisar tocar
-   */
-  private async preloadAcknowledgments(): Promise<void> {
-    // Verificar se acknowledgments estão habilitados
-    if (!appConfig.acknowledgments.enabled) {
-      this.logger.debug('⏭️ Acknowledgments desabilitados');
-      return;
-    }
-    
-    const acknowledgments = appConfig.acknowledgments.phrases;
-    
-    this.logger.debug('🎵 Pré-carregando áudios de acknowledgment...');
-    
-    for (const ack of acknowledgments) {
-      if (!this.acknowledgmentAudioCache.has(ack)) {
-        try {
-          const result = await this.config.tts.synthesize(ack);
-          this.acknowledgmentAudioCache.set(ack, result.audioBuffer);
-        } catch (error) {
-          this.logger.debug(`Erro ao pré-carregar "${ack}":`, error);
-        }
-      }
-    }
-    
-    this.logger.debug(`✅ ${this.acknowledgmentAudioCache.size} acknowledgments pré-carregados`);
-  }
-
   /**
    * Toca uma onomatopeia curta de escuta ativa ("Uhum", "Hm", "Ok")
    * Usado quando detectamos que o usuário continuou falando
    * Dá feedback de que o agente está ouvindo
    */
   private async playListeningAcknowledgment(callId: string): Promise<void> {
-    // Verificar se acknowledgments estão habilitados
-    if (!appConfig.acknowledgments.enabled) {
-      return;
-    }
-    
-    // Cooldown para não ficar repetindo muito
-    const now = Date.now();
-    if (now - this.lastAcknowledgmentTime < appConfig.acknowledgments.cooldownMs) {
-      this.logger.debug('⏳ Acknowledgment em cooldown, pulando');
-      return;
-    }
-    this.lastAcknowledgmentTime = now;
-
-    // Lista de onomatopeias naturais (variação para não parecer robô)
-    const acknowledgments = appConfig.acknowledgments.phrases;
-    const randomAck = acknowledgments[Math.floor(Math.random() * acknowledgments.length)];
-
-    this.logger.info(`🎵 Tocando acknowledgment: "${randomAck}"`);
-
     try {
-      // Verificar cache primeiro
-      let audioBuffer = this.acknowledgmentAudioCache.get(randomAck);
-
-      if (!audioBuffer) {
-        // Gerar áudio via TTS (primeira vez)
-        this.logger.debug(`Gerando áudio para "${randomAck}"...`);
-        const result = await this.config.tts.synthesize(randomAck);
-        audioBuffer = result.audioBuffer;
-        
-        // Cachear para próximas vezes
-        this.acknowledgmentAudioCache.set(randomAck, audioBuffer);
-        this.logger.debug(`✅ Áudio cacheado para "${randomAck}"`);
+      const ack = await this.acknowledgmentManager.getAcknowledgment();
+      if (!ack) {
+        // Cooldown ou desabilitado
+        return;
       }
 
       // Gravar no AudioRoom se disponível
       if (this.audioRoom) {
-        this.audioRoom.feedAgentAudio(audioBuffer);
+        this.audioRoom.feedAgentAudio(ack.audio);
       }
 
       // Tocar áudio (não bloqueia - é só um feedback rápido)
-      await this.config.localProvider.sendAudio(callId, audioBuffer);
+      await this.config.localProvider.sendAudio(callId, ack.audio);
       
       // Finalizar segmento
       if (this.audioRoom) {
@@ -1385,8 +1378,9 @@ export class StreamingVoiceAgent extends EventEmitter {
     this.logger.info(`🤖 Resposta: "${fullResponse.substring(0, 80)}${fullResponse.length > 80 ? '...' : ''}"`);
     this.emit('agent:spoke', callId, fullResponse);
     
-    // 🆕 Guardar resposta para filtrar eco
+    // Guardar resposta para filtrar eco
     this.lastAgentResponse = fullResponse;
+    this.echoFilter.registerAgentResponse(fullResponse);
 
     // Disparar processamento de pensamentos em paralelo (não bloqueia)
     // Aproveita o tempo de reprodução do áudio (~1-3s) enquanto o usuário ouve
@@ -1548,6 +1542,12 @@ export class StreamingVoiceAgent extends EventEmitter {
       }
       this.callRecorder = null;
     }
+
+    // Limpar módulos de gerenciamento de estado
+    this.turnState.clearSession(callId);
+    this.echoFilter.clearSession(callId);
+    this.acknowledgmentManager.clearSession(callId);
+    this.greetingTranscription = ''; // Limpar transcrição guardada da saudação
 
     this.activeSessions.delete(callId);
     this.emit('session:ended', callId, summary);
