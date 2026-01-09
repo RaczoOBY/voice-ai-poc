@@ -231,18 +231,11 @@ export class StreamingVoiceAgent extends EventEmitter {
       });
       
       // Callback para transcrições finais do Scribe
+      // LÓGICA DA MAIN: Simples e direta
       this.config.transcriber.onTranscript!(callId, async (result) => {
-        let resultText = result.text.trim();
+        const resultText = result.text.trim();
         
-        // 🆕 PRIMEIRO: Tentar remover eco do agente do início da transcrição
-        // Isso acontece quando o microfone capta o speaker junto com a fala do usuário
-        const cleanedText = this.removeAgentEchoFromTranscription(resultText);
-        if (cleanedText !== resultText) {
-          resultText = cleanedText;
-          result = { ...result, text: cleanedText }; // Atualizar result também
-        }
-        
-        // 🆕 SEGUNDO: Verificar se é eco puro do agente (ignorar completamente)
+        // PRIMEIRO: Verificar se é eco do agente (ignorar completamente)
         if (this.isLikelyAgentEcho(resultText)) {
           this.logger.info(`🔇 Ignorando eco do agente na transcrição final: "${resultText}"`);
           // Resetar flags de cancelamento se estavam setadas
@@ -253,10 +246,10 @@ export class StreamingVoiceAgent extends EventEmitter {
           return; // Não processar eco
         }
         
-        // 🆕 Verificar se transcrição parece corrompida (eco do agente, onomatopeias)
+        // Verificar se transcrição parece corrompida (eco do agente, onomatopeias)
         const isLikelyCorrupted = this.isTranscriptionCorrupted(resultText);
         
-        // 🆕 Se temos transcrição parcial capturada durante playback e resultado parece corrompido
+        // Se temos transcrição parcial capturada durante playback e resultado parece corrompido
         if (this.partialDuringPlayback && isLikelyCorrupted) {
           this.logger.warn(`⚠️ Transcrição final parece corrompida: "${resultText}"`);
           this.logger.info(`🔄 Usando transcrição parcial capturada: "${this.partialDuringPlayback.substring(0, 50)}..."`);
@@ -278,25 +271,10 @@ export class StreamingVoiceAgent extends EventEmitter {
           return;
         }
         
-        // 🆕 Se detectamos continuação, esta é a transcrição completa - juntar com anterior
+        // Se detectamos continuação, esta é a transcrição completa - juntar com anterior
         if (this.continuationDetected && this.pendingTranscriptionText) {
-          let combinedText: string;
-          
-          const pending = this.pendingTranscriptionText.toLowerCase().trim();
-          const current = resultText.toLowerCase().trim();
-          
-          // Evitar duplicação: se uma transcrição contém a outra, usar a maior
-          if (current.includes(pending) || pending.includes(current)) {
-            // Usar a transcrição mais longa (provavelmente a final é mais completa)
-            combinedText = resultText.length >= this.pendingTranscriptionText.length 
-              ? resultText 
-              : this.pendingTranscriptionText;
-            this.logger.debug(`🔗 Transcrições similares, usando a mais longa: "${combinedText.substring(0, 50)}..."`);
-          } else {
-            // Transcrições diferentes - combinar
-            combinedText = `${this.pendingTranscriptionText} ${resultText}`.trim();
-            this.logger.info(`🔗 Transcrições combinadas: "${combinedText.substring(0, 50)}..."`);
-          }
+          const combinedText = `${this.pendingTranscriptionText} ${result.text}`.trim();
+          this.logger.info(`🔗 Transcrições combinadas: "${combinedText.substring(0, 50)}..."`);
           
           // Criar novo resultado com texto combinado
           const combinedResult: TranscriptionResult = {
@@ -358,30 +336,26 @@ export class StreamingVoiceAgent extends EventEmitter {
           
           const trimmedText = text.trim();
           
-          // 🆕 Verificar se está em playback ANTES de filtrar eco (para permitir barge-in)
-          const isDuringPlayback = !this.isProcessing && this.config.localProvider.isCurrentlyPlaying();
-          
-          // 🆕 Filtrar eco do agente PRIMEIRO - mas NÃO durante playback (permite barge-in)
-          if (!isDuringPlayback && this.isLikelyAgentEcho(trimmedText)) {
+          // Filtrar eco do agente (resíduos que podem vazar mesmo com filtro no LocalAudioProvider)
+          if (this.isLikelyAgentEcho(trimmedText)) {
             this.logger.debug(`🔇 Ignorando eco do agente: "${trimmedText.substring(0, 30)}..."`);
             return; // Não processar eco
           }
           
-          // 🆕 Filtrar transcrições muito curtas ou onomatopeias (mas permitir durante playback se for barge-in)
+          // Filtrar transcrições muito curtas ou onomatopeias
           const isNoise = /^(h+[um]+|hum+|uhum+|ah+|eh+|oh+|uh+)[.!?,\s]*$/i.test(trimmedText) 
-                         || (trimmedText.length < 5 && !isDuringPlayback);
+                         || trimmedText.length < 5;
           if (isNoise) {
             this.logger.debug(`🔇 Ignorando ruído/onomatopeia: "${trimmedText}"`);
             return;
           }
           
-          // 🆕 DETECÇÃO DE CONTINUAÇÃO: Se estamos processando E usuário volta a falar
+          // DETECÇÃO DE CONTINUAÇÃO: Se estamos processando E usuário volta a falar
           // Cancela processamento atual para reprocessar com transcrição completa
           if (this.isProcessing && !this.isGreetingInProgress && trimmedText.length > 5) {
             
             if (!this.hasStartedPlayback) {
               // CASO 1: Áudio ainda não começou - cancela silenciosamente e reprocessa
-              // 🆕 Só cancela se ainda não cancelou (evita loop)
               if (!this.shouldCancelProcessing) {
                 this.logger.info(`🔄 Usuário continuou falando: "${trimmedText.substring(0, 30)}..." - cancelando processamento`);
                 this.shouldCancelProcessing = true;
@@ -395,7 +369,8 @@ export class StreamingVoiceAgent extends EventEmitter {
               }
             } else {
               // CASO 2: Áudio já começou - guardar transcrição parcial e fazer barge-in
-              // Filtrar repetições de "oi" (eco comum)
+              // Essa transcrição pode vir do buffer flushed após barge-in via VAD de energia,
+              // ou de áudio que passou pelo EchoCanceller como não-eco
               const isLikelyEcho = /^(oi[,.\s]*)+$/i.test(trimmedText);
               
               if (!isLikelyEcho && trimmedText.length > this.partialDuringPlayback.length) {
@@ -403,67 +378,35 @@ export class StreamingVoiceAgent extends EventEmitter {
                 this.lastPartialDuringPlaybackTime = Date.now();
                 this.logger.info(`👂 Transcrição parcial durante playback: "${trimmedText.substring(0, 40)}..."`);
                 
-                // 🔇 Disparar barge-in via código (não esperar EchoCanceller)
+                // 🔇 Disparar barge-in via código (backup do VAD de energia)
                 if (!this.wasInterrupted) {
                   this.logger.info('🔇 Barge-in via transcrição parcial - usuário está falando!');
                   this.config.localProvider.stopPlayback();
-                  
-                  // 🎵 Tocar onomatopeia de escuta ativa ("Uhum", "Hm", "Ok")
-                  this.playListeningAcknowledgment(callId).catch(err => {
-                    this.logger.debug('Erro ao tocar acknowledgment (não crítico):', err);
-                  });
+                  // Nota: o evento playback:interrupted será emitido pelo LocalAudioProvider
                 }
               }
             }
           }
           
-          // 🆕 DETECÇÃO DE BARGE-IN DURANTE PLAYBACK: Áudio está reproduzindo mas não estamos processando
-          // Isso cobre o caso onde o usuário fala enquanto o agente está falando (barge-in real)
-          const checkBargeIn = !this.isProcessing && !this.isGreetingInProgress && this.config.localProvider.isCurrentlyPlaying();
-          
-          if (checkBargeIn) {
-            // Durante playback, aceitar transcrições mais curtas (mínimo 3 caracteres) para detectar barge-in mais rápido
-            const minLength = 3;
+          // 🆕 CASO 3: Barge-in durante reprodução (quando isProcessing já é false)
+          // Isso acontece quando o LLM/TTS terminou mas o áudio ainda está sendo reproduzido
+          // A main tinha isso como parte do CASO 2, mas só funciona se isProcessing = true
+          if (!this.isProcessing && !this.isGreetingInProgress && 
+              this.config.localProvider.isCurrentlyPlaying() && trimmedText.length > 5) {
+            const isLikelyEcho = /^(oi[,.\s]*)+$/i.test(trimmedText);
             
-            if (trimmedText.length >= minLength) {
-              // 🆕 Verificar se é eco do agente (transcrição do áudio que está tocando)
-              // Durante playback, o STT pode transcrever o áudio do speaker
-              const isAgentEchoDuringPlayback = this.isEchoDuringPlayback(trimmedText);
-              
-              if (isAgentEchoDuringPlayback) {
-                this.logger.debug(`🔇 Ignorando eco do agente durante playback: "${trimmedText.substring(0, 40)}..."`);
-                return; // Não disparar barge-in para eco
-              }
-              
-              // Filtrar apenas repetições muito óbvias de "oi" (eco comum)
-              const isLikelyEcho = /^(oi[,.\s]*)+$/i.test(trimmedText);
-              
-              // Verificar se é uma transcrição nova ou mais longa que a anterior
-              const isNewOrLonger = trimmedText.length > this.partialDuringPlayback.length || 
-                                   (trimmedText.length === this.partialDuringPlayback.length && 
-                                    trimmedText !== this.partialDuringPlayback);
-              
-              if (!isLikelyEcho && isNewOrLonger) {
-                this.partialDuringPlayback = trimmedText;
-                this.lastPartialDuringPlaybackTime = Date.now();
-                this.logger.info(`👂 Barge-in detectado: "${trimmedText.substring(0, 40)}..."`);
-                
-                // 🔇 Disparar barge-in via código (não esperar EchoCanceller)
-                if (!this.wasInterrupted) {
-                  this.logger.info('🔇 Barge-in via transcrição parcial - usuário está falando!');
-                  this.config.localProvider.stopPlayback();
-                  
-                  // 🎵 Tocar onomatopeia de escuta ativa ("Uhum", "Hm", "Ok")
-                  this.playListeningAcknowledgment(callId).catch(err => {
-                    this.logger.debug('Erro ao tocar acknowledgment (não crítico):', err);
-                  });
-                }
-              }
+            if (!isLikelyEcho && !this.wasInterrupted) {
+              this.partialDuringPlayback = trimmedText;
+              this.logger.info(`👂 Transcrição parcial durante playback (pós-processamento): "${trimmedText.substring(0, 40)}..."`);
+              this.logger.info('🔇 Barge-in via transcrição parcial - usuário está falando!');
+              this.config.localProvider.stopPlayback();
+              // Nota: o evento playback:interrupted será emitido pelo LocalAudioProvider
             }
           }
           
           // Pré-processamento: detectar possível fim de frase e pré-construir contexto LLM
-          if (!this.isProcessing && !this.isGreetingInProgress && trimmedText.length > 5) {
+          if (!this.isProcessing && !this.isGreetingInProgress && 
+              !this.config.localProvider.isCurrentlyPlaying() && trimmedText.length > 5) {
             this.handlePartialTranscriptForPreprocessing(callId, trimmedText);
           }
         });
@@ -682,172 +625,6 @@ export class StreamingVoiceAgent extends EventEmitter {
     // É normal o usuário falar sobre o mesmo assunto usando palavras em comum.
     
     return false;
-  }
-
-  /**
-   * Verifica se uma transcrição parcial durante playback é eco do agente
-   * Esta versão é mais sensível que isLikelyAgentEcho porque:
-   * 1. O STT pode transcrever de forma imprecisa ("Taís" → "tá aí")
-   * 2. Comparamos as primeiras palavras do que está sendo falado
-   */
-  private isEchoDuringPlayback(text: string): boolean {
-    if (!this.lastAgentResponse || text.length < 3) return false;
-    
-    const normalizedText = this.normalizeForComparison(text);
-    const normalizedAgent = this.normalizeForComparison(this.lastAgentResponse);
-    
-    // 1. Verificar se é substring exata (como antes)
-    if (normalizedText.length >= 8 && normalizedAgent.includes(normalizedText)) {
-      return true;
-    }
-    
-    // 2. Verificar se as primeiras palavras são similares
-    const textWords = normalizedText.split(/\s+/).slice(0, 5); // Primeiras 5 palavras
-    const agentWords = normalizedAgent.split(/\s+/).slice(0, 10); // Primeiras 10 palavras do agente
-    
-    if (textWords.length < 2) return false;
-    
-    // Contar palavras em comum (ignorando palavras muito curtas)
-    const significantTextWords = textWords.filter(w => w.length > 2);
-    const significantAgentWords = agentWords.filter(w => w.length > 2);
-    
-    if (significantTextWords.length === 0) return false;
-    
-    let matchCount = 0;
-    for (const word of significantTextWords) {
-      if (significantAgentWords.some(agentWord => 
-        agentWord === word || 
-        agentWord.startsWith(word) || 
-        word.startsWith(agentWord) ||
-        this.levenshteinDistance(word, agentWord) <= 2 // Tolera 2 caracteres de diferença
-      )) {
-        matchCount++;
-      }
-    }
-    
-    // Se mais de 60% das palavras significativas são similares ao início da fala do agente, é eco
-    const matchRatio = matchCount / significantTextWords.length;
-    if (matchRatio > 0.6 && matchCount >= 2) {
-      this.logger.debug(`🔇 Eco detectado por similaridade de palavras (${matchCount}/${significantTextWords.length}): "${text}"`);
-      return true;
-    }
-    
-    return false;
-  }
-
-  /**
-   * Normaliza texto para comparação (remove pontuação, acentos, etc.)
-   */
-  private normalizeForComparison(text: string): string {
-    return text
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '') // Remove acentos
-      .replace(/[.,!?;:'"]/g, '') // Remove pontuação
-      .trim();
-  }
-
-  /**
-   * Calcula a distância de Levenshtein entre duas strings
-   */
-  private levenshteinDistance(a: string, b: string): number {
-    if (a.length === 0) return b.length;
-    if (b.length === 0) return a.length;
-    
-    const matrix: number[][] = [];
-    
-    for (let i = 0; i <= b.length; i++) {
-      matrix[i] = [i];
-    }
-    
-    for (let j = 0; j <= a.length; j++) {
-      matrix[0][j] = j;
-    }
-    
-    for (let i = 1; i <= b.length; i++) {
-      for (let j = 1; j <= a.length; j++) {
-        if (b.charAt(i - 1) === a.charAt(j - 1)) {
-          matrix[i][j] = matrix[i - 1][j - 1];
-        } else {
-          matrix[i][j] = Math.min(
-            matrix[i - 1][j - 1] + 1, // substituição
-            matrix[i][j - 1] + 1,     // inserção
-            matrix[i - 1][j] + 1      // deleção
-          );
-        }
-      }
-    }
-    
-    return matrix[b.length][a.length];
-  }
-
-  /**
-   * Remove o eco do agente do início da transcrição do usuário
-   * Isso acontece quando o microfone capta o speaker durante o playback
-   * Exemplo: Agente disse "Legal, Oscar. Vi que você se cadastrou. Me conta, qual é teu negócio hoje?"
-   *          Transcrição veio "Legal, Oscar. Vi que você se cadastrou. Me conta, qual é teu negócio? Então, hoje meu negócio é consórcio."
-   *          Retorna: "Então, hoje meu negócio é consórcio."
-   */
-  private removeAgentEchoFromTranscription(text: string): string {
-    if (!this.lastAgentResponse || text.length < 10) return text;
-    
-    // Estratégia: Encontrar onde o eco do agente termina no texto
-    // O agente geralmente termina com uma pergunta (?) ou ponto final (.)
-    
-    const agentText = this.lastAgentResponse.toLowerCase().trim();
-    const inputText = text.toLowerCase();
-    
-    // Pegar as últimas palavras significativas do agente (âncora)
-    const agentWords = agentText.split(/\s+/).filter(w => w.length > 2);
-    if (agentWords.length < 3) return text;
-    
-    // Procurar as últimas 3-5 palavras do agente no texto de entrada
-    for (let anchorLen = Math.min(5, agentWords.length); anchorLen >= 3; anchorLen--) {
-      const anchorWords = agentWords.slice(-anchorLen);
-      const anchorPattern = anchorWords.join('\\s+').replace(/[.,!?]/g, '[.,!?]?');
-      
-      try {
-        const regex = new RegExp(anchorPattern, 'i');
-        const match = inputText.match(regex);
-        
-        if (match && match.index !== undefined) {
-          // Encontramos onde o eco do agente termina!
-          const endOfEcho = match.index + match[0].length;
-          
-          // Verificar se há texto do usuário depois
-          let remaining = text.substring(endOfEcho).trim();
-          
-          // Remover pontuação inicial
-          remaining = remaining.replace(/^[.,!?;:\s]+/, '').trim();
-          
-          // Garantir que começa com letra maiúscula (início de frase)
-          if (remaining.length >= 5) {
-            // Capitalizar primeira letra se necessário
-            remaining = remaining.charAt(0).toUpperCase() + remaining.slice(1);
-            
-            this.logger.info(`🔇 Eco do agente removido: "${text.substring(0, 40)}..." → "${remaining.substring(0, 50)}..."`);
-            return remaining;
-          }
-        }
-      } catch {
-        // Regex inválida, tentar próximo
-      }
-    }
-    
-    // Fallback: Procurar por padrões de transição comum
-    // Ex: "negócio? Então" ou "hoje? Eu" - pergunta seguida de resposta
-    const transitionMatch = text.match(/\?\s+([A-ZÁÀÂÃÉÊÍÓÔÕÚÇ][a-záàâãéêíóôõúç])/);
-    if (transitionMatch && transitionMatch.index !== undefined) {
-      const startOfUser = transitionMatch.index + 2; // Após "? "
-      const remaining = text.substring(startOfUser).trim();
-      
-      if (remaining.length >= 5) {
-        this.logger.info(`🔇 Eco do agente removido (transição): "${text.substring(0, 40)}..." → "${remaining.substring(0, 50)}..."`);
-        return remaining;
-      }
-    }
-    
-    return text;
   }
 
   /**
@@ -1191,7 +968,7 @@ export class StreamingVoiceAgent extends EventEmitter {
         return;
       }
 
-      // 🆕 Verificar se deve cancelar (usuário continuou falando)
+      // Verificar se deve cancelar (usuário continuou falando)
       if (this.shouldCancelProcessing) {
         this.logger.info(`🔄 Cancelando processamento - aguardando continuação do usuário`);
         this.pendingTranscriptionText = transcriptText; // Salvar para combinar depois

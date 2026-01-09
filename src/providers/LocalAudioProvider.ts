@@ -72,8 +72,8 @@ const VAD_CONFIG = {
   MIN_SPEECH_DURATION_MS: 500,   // Mínimo de 500ms para considerar fala
   FRAME_SIZE_MS: 30,             // Tamanho do frame para análise (30ms)
   // Configurações de confirmação de barge-in - MAIS SENSÍVEL
-  BARGE_IN_CONFIRM_FRAMES: 3,    // Frames consecutivos (~90ms) - reduzido de 5 para detecção mais rápida
-  BARGE_IN_ENERGY_MULTIPLIER: 1.2, // Energia deve ser 1.2x o threshold - reduzido de 1.5 para maior sensibilidade
+  BARGE_IN_CONFIRM_FRAMES: 2,    // Frames consecutivos (~60ms) - reduzido de 3 para detectar falas "entrecortadas"
+  BARGE_IN_ENERGY_MULTIPLIER: 0.8, // Energia deve ser 0.8x o threshold - mais sensível (era 1.2)
   // Proteção contra feedback (microfone capturando o speaker)
   // ⚠️ Se true: sem feedback, mas sem barge-in
   // ⚠️ Se false: com barge-in, mas pode ter feedback (use fones de ouvido!)
@@ -313,9 +313,10 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
                                  echoAnalysis.correlation > 0.5 && 
                                  echoAnalysis.confidence > 0.7;
         
-        // Log de debug para monitorar níveis de energia durante playback
-        if (energy > VAD_CONFIG.ENERGY_THRESHOLD * 0.5) {
-          this.logger.debug(`🎤 Durante playback: energia=${energy.toFixed(4)}, threshold=${bargeInThreshold.toFixed(4)}, frames=${this.consecutiveSpeechFrames}, corr=${echoAnalysis.correlation.toFixed(3)}, eco=${isDefinitelyEcho ? 'SIM' : 'NÃO'}`);
+        // 🔍 DIAGNÓSTICO: Log INFO para ver energia durante playback
+        // Loga QUALQUER energia acima de 0.005 (muito baixo) para diagnosticar
+        if (energy > 0.005) {
+          this.logger.info(`🎤 PLAYBACK energia=${energy.toFixed(4)} | threshold=${bargeInThreshold.toFixed(4)} | eco=${echoAnalysis.isEcho ? `SIM(${echoAnalysis.correlation.toFixed(2)})` : 'NÃO'} | frames=${this.consecutiveSpeechFrames}`);
         }
         
         // Considera barge-in se:
@@ -337,22 +338,27 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
             this.lastPlaybackEndTime = Date.now() - LocalAudioProvider.PLAYBACK_COOLDOWN_MS;
           }
         } else {
-          // Resetar apenas se energia caiu significativamente OU é definitivamente eco
+          // DECAY GRADUAL em vez de reset imediato
+          // Isso permite detectar falas "entrecortadas" onde a energia oscila
           if (this.consecutiveSpeechFrames > 0) {
-            const reason = isDefinitelyEcho ? `eco confirmado (corr: ${echoAnalysis.correlation.toFixed(3)})` : `energia muito baixa (${energy.toFixed(4)})`;
-            this.logger.debug(`🎤 Barge-in reset: ${reason}`);
+            if (isDefinitelyEcho) {
+              // Se é definitivamente eco, resetar completamente
+              this.logger.debug(`🎤 Barge-in reset: eco confirmado (corr: ${echoAnalysis.correlation.toFixed(3)})`);
+              this.consecutiveSpeechFrames = 0;
+              this.bargeInTriggered = false;
+            } else {
+              // Se apenas energia baixa, decrementar (decay gradual)
+              // Isso tolera pequenas pausas na fala do usuário
+              this.consecutiveSpeechFrames = Math.max(0, this.consecutiveSpeechFrames - 1);
+              this.logger.debug(`🎤 Barge-in decay: frames=${this.consecutiveSpeechFrames} (energia baixa: ${energy.toFixed(4)})`);
+            }
           }
-          this.consecutiveSpeechFrames = 0;
-          this.bargeInTriggered = false;
         }
         
-        // 🆕 SEMPRE enviar para Scribe durante playback para permitir barge-in via transcrição parcial
-        // Isso permite que o StreamingVoiceAgent detecte barge-in mesmo quando a energia não é suficiente
-        // (ex: usuário está falando baixo mas claramente)
-        const chunkCallback = this.audioChunkCallbacks.get(callId);
-        if (chunkCallback && !isDefinitelyEcho) {
-          chunkCallback(chunk);
-        }
+        // NÃO enviar para Scribe durante playback (causa eco no modo local)
+        // O microfone capta o speaker, então enviar para STT causaria transcrição do eco
+        // Barge-in funciona via VAD de energia + EchoCanceller (detectado acima)
+        // Buffer será enviado após barge-in via flushPlaybackBuffer()
         return;
       }
       
@@ -775,6 +781,7 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
 
     this.isStreamingStarted = true;
     this.isPlaying = true;
+    this.logger.info('🔊 Playback INICIADO - barge-in via energia ativo');
     
     // Inicializar fade-in para suavizar início do áudio
     this.fadeInSamplesRemaining = LocalAudioProvider.FADE_IN_SAMPLES;
@@ -794,6 +801,7 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
     });
 
     this.currentSpeaker.on('close', () => {
+      this.logger.info('🔊 Playback FINALIZADO');
       this.isPlaying = false;
       this.lastPlaybackEndTime = Date.now();
       this.currentSpeaker = null;
