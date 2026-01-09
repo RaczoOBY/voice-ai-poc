@@ -49,7 +49,13 @@ async function main() {
   let transcriber: ITranscriber;
   if (config.mode === 'twilio') {
     logger.info('🎤 Usando ElevenLabs Scribe (STT streaming) para Twilio');
-    transcriber = new ElevenLabsScribe(config.elevenlabs);
+    // 🆕 Usar μ-law direto do Twilio - evita conversão que corrompe áudio!
+    transcriber = new ElevenLabsScribe({
+      apiKey: config.elevenlabs.apiKey, // API key vem do config.elevenlabs
+      ...config.stt.elevenlabs, // Parâmetros de STT (vadThreshold, minSpeechDurationMs, etc)
+      audioFormat: 'ulaw_8000', // Twilio envia μ-law 8kHz - Scribe aceita direto
+      sampleRate: 8000, // Twilio envia 8kHz
+    });
   } else {
     logger.info('🎤 Usando OpenAI Whisper (STT batch) para Telnyx');
     transcriber = new OpenAITranscriber(config.openai);

@@ -61,7 +61,9 @@ export class VoiceAgent extends EventEmitter {
   private isProcessing: Map<string, boolean> = new Map();
   private pendingTranscription: Map<string, string> = new Map();
   private transcriptionDebounceTimer: Map<string, NodeJS.Timeout> = new Map();
-  private static readonly TRANSCRIPTION_DEBOUNCE_MS = 800; // Espera 800ms após última transcrição antes de processar
+  // Debounce adaptativo: menor para streaming (Scribe já faz VAD), maior para batch
+  private static readonly TRANSCRIPTION_DEBOUNCE_STREAMING_MS = 150; // Streaming STT (Scribe) - já faz VAD
+  private static readonly TRANSCRIPTION_DEBOUNCE_BATCH_MS = 800; // Batch STT (Whisper) - precisa agregar
   
   // 🆕 Detecção de continuação (paridade com StreamingVoiceAgent)
   private continuationDetected: Map<string, boolean> = new Map();
@@ -70,14 +72,32 @@ export class VoiceAgent extends EventEmitter {
   private lastAcknowledgmentTime: Map<string, number> = new Map();
   private static readonly ACKNOWLEDGMENT_COOLDOWN_MS = 3000; // Cooldown entre acknowledgments
   
+  // 🆕 Texto parcial capturado durante barge-in (caso Scribe não termine antes de desligar)
+  private pendingBargeInText: Map<string, string> = new Map();
+  
   // Rastreamento de duração da reprodução (para detectar barge-in durante playback no Twilio)
   private audioPlaybackEndTime: Map<string, number> = new Map();
   private totalAudioBytesSent: Map<string, number> = new Map();
   private audioPlaybackStartTime: Map<string, number> = new Map();
   
   // Grace period para evitar falsos positivos de barge-in por eco
-  private static readonly BARGE_IN_GRACE_PERIOD_MS = 1500; // Ignora barge-in por áudio nos primeiros 1.5s
-  private static readonly BARGE_IN_RMS_THRESHOLD = 1500; // Threshold mais alto para evitar ruídos
+  private static readonly BARGE_IN_GRACE_PERIOD_MS = 1500; // Ignora barge-in nos primeiros 1.5s de cada resposta
+  private static readonly BARGE_IN_RMS_THRESHOLD = 800; // Threshold de energia
+  // NOTA: Durante a saudação, barge-in é desabilitado completamente (não apenas grace period)
+  // Isso permite que o usuário diga "Alô?" naturalmente sem interromper a apresentação
+  
+  // 🆕 Flag para indicar que a saudação está em andamento
+  private isGreetingPlaying: Map<string, boolean> = new Map();
+  
+  // 🆕 Buffer para transcrições durante saudação (combinadas com próxima fala)
+  private greetingTranscription: Map<string, string> = new Map();
+  
+  // 🆕 Controle de throttling para evitar queue_overflow no Scribe
+  // IMPORTANTE: Agora usa BUFFER em vez de descartar chunks
+  private lastAudioSentTime: Map<string, number> = new Map();
+  private audioAccumulationBuffer: Map<string, Buffer[]> = new Map(); // Buffer para acumular chunks
+  private static readonly MIN_AUDIO_INTERVAL_MS = 40; // Intervalo de envio ao Scribe (40ms = 25 envios/s)
+  private static readonly MAX_BUFFER_SIZE_BYTES = 3200; // Máximo de ~400ms de áudio μ-law 8kHz antes de flush
 
   // Camada de inteligência centralizada (pensamentos, contexto, etc)
   private intelligence: VoiceIntelligence;
@@ -376,7 +396,7 @@ export class VoiceAgent extends EventEmitter {
                       this.logger.error(`❌ Falha ao iniciar STT streaming:`, error);
                     }
                     
-                    // 🆕 Configurar callback para transcrições PARCIAIS (detecção de continuação)
+                    // 🆕 Configurar callback para transcrições PARCIAIS (detecção de continuação e barge-in)
                     if (this.config.transcriber.onPartialTranscript) {
                       this.config.transcriber.onPartialTranscript(callSid, (text) => {
                         const trimmedText = text.trim();
@@ -393,10 +413,16 @@ export class VoiceAgent extends EventEmitter {
                             // 🎵 Tocar acknowledgment ("Uhum")
                             this.playAcknowledgment(callSid);
                           }
-                        } else if (this.isProcessing.get(callSid) && this.hasStartedPlayback.get(callSid)) {
-                          // CASO 2: Áudio já começou - barge-in
-                          this.logger.info(`👂 Transcrição parcial durante playback: "${trimmedText.substring(0, 40)}..."`);
-                          // Barge-in será detectado via energia de áudio
+                        } else if (this.hasStartedPlayback.get(callSid) || this.isPlayingAudio.get(callSid)) {
+                          // CASO 2: Áudio tocando - salvar texto parcial para barge-in
+                          // 🆕 IMPORTANTE: Salvar mesmo que barge-in ainda não tenha sido detectado
+                          // Se o usuário desligar antes do Scribe terminar, usamos este texto
+                          const existingPartial = this.pendingBargeInText.get(callSid) || '';
+                          // Só atualizar se o novo texto for diferente e mais longo
+                          if (trimmedText !== existingPartial && trimmedText.length > existingPartial.length) {
+                            this.logger.info(`👂 Texto parcial durante playback: "${trimmedText.substring(0, 40)}..."`);
+                            this.pendingBargeInText.set(callSid, trimmedText);
+                          }
                         }
                       });
                     }
@@ -425,30 +451,103 @@ export class VoiceAgent extends EventEmitter {
                 // Decodificar áudio de base64 (mulaw 8kHz)
                 const audioChunk = Buffer.from(message.media.payload, 'base64');
                 
-                // Converter μ-law 8kHz → PCM 16kHz para o STT
+                // 🆕 Converter μ-law → PCM apenas para cálculo de RMS (barge-in)
+                // O Scribe recebe μ-law direto (sem conversão) para evitar corrupção de áudio
                 const pcmChunk = this.convertMulawToPcm(audioChunk);
                 
                 // Gravar áudio do usuário
                 this.recordUserAudio(currentCallSid, audioChunk);
                 
-                // Detectar barge-in: se estamos reproduzindo áudio e usuário fala
-                if (this.isPlayingAudio.get(currentCallSid)) {
+                // Detectar barge-in: verificar se áudio REALMENTE está tocando no Twilio
+                // Usar audioPlaybackEndTime como fonte primária (mais precisa)
+                const now = Date.now();
+                const playbackEndTime = this.audioPlaybackEndTime.get(currentCallSid) || 0;
+                const playbackStartTime = this.audioPlaybackStartTime.get(currentCallSid) || 0;
+                
+                // 🆕 Só considerar como "tocando" se playbackEndTime está no futuro
+                // Isso evita falsos positivos quando isPlayingAudio não foi resetado
+                const audioStillPlaying = playbackEndTime > 0 && now < playbackEndTime;
+                
+                if (audioStillPlaying) {
                   // Verificar grace period (evita falsos positivos por eco)
-                  const playbackStartTime = this.audioPlaybackStartTime.get(currentCallSid) || 0;
-                  const timeSincePlaybackStart = Date.now() - playbackStartTime;
+                  const timeSincePlaybackStart = now - playbackStartTime;
+                  const remainingMs = playbackEndTime - now;
                   
-                  if (timeSincePlaybackStart > VoiceAgent.BARGE_IN_GRACE_PERIOD_MS) {
-                    // Verificar se há energia no áudio (não é silêncio) com threshold mais alto
-                    const hasEnergy = this.detectAudioEnergy(pcmChunk, VoiceAgent.BARGE_IN_RMS_THRESHOLD);
-                    if (hasEnergy) {
-                      this.detectBargeIn(currentCallSid);
+                  // 🆕 Durante a saudação, NÃO detectar barge-in por energia
+                  // O "Alô?" do usuário é resposta natural, não interrupção
+                  const isGreeting = this.isGreetingPlaying.get(currentCallSid) || false;
+                  
+                  if (isGreeting) {
+                    // Durante saudação: ignorar completamente barge-in
+                    // O áudio continua tocando e a transcrição será processada normalmente
+                    if (Math.random() < 0.01) { // Log muito raro (1%) para diagnóstico
+                      this.logger.debug(`👋 Saudação em andamento - barge-in desabilitado (${remainingMs.toFixed(0)}ms restantes)`);
+                    }
+                  } else {
+                    // Turnos normais: usar grace period padrão
+                    const gracePeriod = VoiceAgent.BARGE_IN_GRACE_PERIOD_MS;
+                    
+                    // Calcular RMS para diagnóstico (usa PCM convertido)
+                    const rms = this.calculateRMS(pcmChunk);
+                    
+                    if (timeSincePlaybackStart > gracePeriod) {
+                      // Verificar se há energia no áudio (não é silêncio)
+                      const hasEnergy = rms > VoiceAgent.BARGE_IN_RMS_THRESHOLD;
+                      
+                      // Log periódico de diagnóstico (a cada ~1s)
+                      if (Math.random() < 0.1) { // ~10% dos chunks para não poluir
+                        this.logger.debug(`🎤 BARGE-IN check: rms=${rms.toFixed(0)}, threshold=${VoiceAgent.BARGE_IN_RMS_THRESHOLD}, hasEnergy=${hasEnergy}, remainingAudio=${remainingMs.toFixed(0)}ms`);
+                      }
+                      
+                      if (hasEnergy && !this.bargeInDetected.get(currentCallSid)) {
+                        this.logger.info(`🔇 Barge-in por ENERGIA detectado! (rms=${rms.toFixed(0)}, ${remainingMs.toFixed(0)}ms restantes)`);
+                        this.detectBargeIn(currentCallSid);
+                      }
+                    } else {
+                      // Log do grace period
+                      if (Math.random() < 0.05) {
+                        this.logger.debug(`⏳ Grace period: ${timeSincePlaybackStart.toFixed(0)}ms < ${gracePeriod}ms, rms=${rms.toFixed(0)}`);
+                      }
                     }
                   }
                 }
                 
-                // Enviar para o transcriber (STT) apenas se estiver pronto
+                // 🆕 Enviar ÁUDIO RAW (μ-law) para o Scribe - evita conversão que corrompe áudio!
+                // O Scribe foi configurado com audioFormat='mulaw' para aceitar direto
+                // 🔧 FIX: Usar buffer de acumulação em vez de descartar chunks
+                // Isso evita perder partes do áudio que causavam transcrição incorreta ("Oscar" → "nosso cara")
                 if (sttReady && this.config.transcriber.feedAudio && currentCallSid) {
-                  this.config.transcriber.feedAudio(currentCallSid, pcmChunk);
+                  // Inicializar buffer se não existe
+                  if (!this.audioAccumulationBuffer.has(currentCallSid)) {
+                    this.audioAccumulationBuffer.set(currentCallSid, []);
+                  }
+                  
+                  // Acumular chunk no buffer
+                  const buffer = this.audioAccumulationBuffer.get(currentCallSid)!;
+                  buffer.push(audioChunk);
+                  
+                  // Calcular tamanho total do buffer
+                  const totalBufferSize = buffer.reduce((sum, b) => sum + b.length, 0);
+                  
+                  const lastSent = this.lastAudioSentTime.get(currentCallSid) || 0;
+                  const timeSinceLastSent = now - lastSent;
+                  
+                  // Enviar buffer acumulado se:
+                  // 1. Passou tempo suficiente desde último envio (40ms)
+                  // 2. OU buffer ficou muito grande (evitar atraso excessivo)
+                  if (timeSinceLastSent >= VoiceAgent.MIN_AUDIO_INTERVAL_MS || 
+                      totalBufferSize >= VoiceAgent.MAX_BUFFER_SIZE_BYTES) {
+                    
+                    // Concatenar todos os chunks acumulados
+                    const combinedBuffer = Buffer.concat(buffer);
+                    
+                    // Limpar buffer
+                    this.audioAccumulationBuffer.set(currentCallSid, []);
+                    this.lastAudioSentTime.set(currentCallSid, now);
+                    
+                    // Enviar buffer combinado para o Scribe
+                    this.config.transcriber.feedAudio(currentCallSid, combinedBuffer);
+                  }
                 } else if (!sttReady) {
                   // Buffer enquanto STT não está pronto (descarta para evitar overflow)
                   // Os primeiros ~100ms de áudio serão perdidos, mas é aceitável
@@ -781,9 +880,24 @@ export class VoiceAgent extends EventEmitter {
     const now = Date.now();
     const playbackEndTime = this.audioPlaybackEndTime.get(callId) || 0;
     const audioStillPlaying = now < playbackEndTime;
+    const isGreeting = this.isGreetingPlaying.get(callId) || false;
     
-    this.logger.debug(`📊 Estado de reprodução: playbackEndTime=${playbackEndTime}, now=${now}, diff=${playbackEndTime - now}ms`);
+    this.logger.debug(`📊 Estado de reprodução: playbackEndTime=${playbackEndTime}, now=${now}, diff=${playbackEndTime - now}ms, isGreeting=${isGreeting}`);
     
+    // 🆕 Durante a saudação, NÃO detectar barge-in e NÃO processar transcrição
+    // O "Alô?" do usuário é resposta natural ao atender - guardar para combinar com próxima fala
+    if (isGreeting) {
+      const remainingTime = playbackEndTime - now;
+      // Guardar transcrição para combinar depois (não processar sozinha)
+      const existingGreetingText = this.greetingTranscription.get(callId) || '';
+      const combinedGreetingText = existingGreetingText ? `${existingGreetingText} ${userText}` : userText;
+      this.greetingTranscription.set(callId, combinedGreetingText);
+      this.logger.info(`👋 Transcrição durante saudação guardada: "${userText}" (${Math.round(remainingTime)}ms restantes) - será combinada com próxima fala`);
+      // NÃO processar - retornar e esperar próxima transcrição
+      return;
+    }
+    
+    // Turnos normais: detectar barge-in se áudio ainda está tocando
     if (audioStillPlaying && !this.bargeInDetected.get(callId)) {
       const remainingTime = playbackEndTime - now;
       this.logger.info(`🔇 BARGE-IN DETECTADO por transcrição! (${Math.round(remainingTime)}ms restantes de áudio)`);
@@ -798,12 +912,23 @@ export class VoiceAgent extends EventEmitter {
       // Cancelar fila de TTS pendente
       this.cancelTTSQueue(callId);
     }
+    
+    // 🆕 Combinar com transcrição guardada durante saudação (se houver)
+    const greetingText = this.greetingTranscription.get(callId);
+    if (greetingText) {
+      userText = `${greetingText} ${userText}`;
+      this.greetingTranscription.delete(callId);
+      this.logger.info(`🔗 Transcrição combinada com saudação: "${userText.substring(0, 50)}..."`);
+    }
 
     // Resetar flag de barge-in se existir (nova transcrição = usuário terminou de falar)
     if (this.bargeInDetected.get(callId)) {
       this.logger.info(`🔇 Barge-in pendente resetado - processando nova transcrição`);
       this.bargeInDetected.set(callId, false);
     }
+    
+    // 🆕 Limpar texto parcial de barge-in (transcrição final chegou)
+    this.pendingBargeInText.delete(callId);
 
     // 🆕 Se detectamos continuação via parciais, esta é a transcrição completa - combinar
     if (this.continuationDetected.get(callId)) {
@@ -842,6 +967,12 @@ export class VoiceAgent extends EventEmitter {
       clearTimeout(existingTimer);
     }
 
+    // 🆕 Debounce adaptativo: menor para streaming STT (Scribe já faz VAD), maior para batch
+    const isStreamingSTT = !!(this.config.transcriber.startStream && this.config.transcriber.onPartialTranscript);
+    const debounceMs = isStreamingSTT 
+      ? VoiceAgent.TRANSCRIPTION_DEBOUNCE_STREAMING_MS 
+      : VoiceAgent.TRANSCRIPTION_DEBOUNCE_BATCH_MS;
+
     // Agendar processamento após debounce
     const timer = setTimeout(async () => {
       const textToProcess = this.pendingTranscription.get(callId);
@@ -853,10 +984,10 @@ export class VoiceAgent extends EventEmitter {
       
       // Processar o texto agregado
       await this.processAggregatedText(callId, textToProcess);
-    }, VoiceAgent.TRANSCRIPTION_DEBOUNCE_MS);
+    }, debounceMs);
     
     this.transcriptionDebounceTimer.set(callId, timer);
-    this.logger.debug(`⏳ Debounce iniciado (${VoiceAgent.TRANSCRIPTION_DEBOUNCE_MS}ms) para: "${userText}"`);
+    this.logger.debug(`⏳ Debounce iniciado (${debounceMs}ms${isStreamingSTT ? ' - streaming' : ' - batch'}) para: "${userText}"`);
   }
 
   /**
@@ -1199,8 +1330,12 @@ export class VoiceAgent extends EventEmitter {
         const audioStillPlaying = now < playbackEndTime;
         
         if (audioStillPlaying) {
-          // Ainda tem áudio tocando - esperar até terminar + debounce
-          const waitTime = (playbackEndTime - now) + VoiceAgent.TRANSCRIPTION_DEBOUNCE_MS;
+          // Ainda tem áudio tocando - esperar até terminar + debounce adaptativo
+          const isStreamingSTT = !!(this.config.transcriber.startStream && this.config.transcriber.onPartialTranscript);
+          const debounceMs = isStreamingSTT 
+            ? VoiceAgent.TRANSCRIPTION_DEBOUNCE_STREAMING_MS 
+            : VoiceAgent.TRANSCRIPTION_DEBOUNCE_BATCH_MS;
+          const waitTime = (playbackEndTime - now) + debounceMs;
           this.logger.info(`📝 Transcrição pendente aguardando áudio terminar (${Math.round(waitTime)}ms): "${pendingText.substring(0, 40)}..."`);
           
           // Agendar para quando o áudio terminar (mantém na pendingTranscription para barge-in detectar)
@@ -1307,6 +1442,7 @@ export class VoiceAgent extends EventEmitter {
       this.logger.info(`🔇 Barge-in detectado para call ${callId} (${remainingTime}ms restantes de áudio)`);
       this.bargeInDetected.set(callId, true);
       this.isPlayingAudio.set(callId, false);
+      this.isGreetingPlaying.set(callId, false); // 🆕 Resetar flag de saudação
       this.audioPlaybackEndTime.set(callId, 0); // Resetar tempo de término
       this.totalAudioBytesSent.set(callId, 0); // Resetar contador de bytes
       
@@ -1315,7 +1451,25 @@ export class VoiceAgent extends EventEmitter {
       
       // Cancelar fila de TTS pendente (importante para resposta rápida)
       this.cancelTTSQueue(callId);
+      
+      // 🆕 Tocar feedback imediato para o usuário saber que foi ouvido
+      // Não usar playAcknowledgment pois ele verifica cooldown
+      this.playBargeInFeedback(callId).catch(err => {
+        this.logger.debug('Erro ao tocar feedback de barge-in (não crítico):', err);
+      });
     }
+  }
+  
+  /**
+   * 🆕 Toca um som curto imediato após barge-in para feedback ao usuário
+   * DESABILITADO: Estava causando cascata de barge-ins
+   * O feedback será dado pela resposta rápida do agente
+   */
+  private async playBargeInFeedback(callId: string): Promise<void> {
+    // DESABILITADO - o "Hm" estava sendo detectado como playback
+    // e causando novos barge-ins em loop
+    this.logger.debug(`🔇 Feedback de barge-in desabilitado (evita cascata)`);
+    return;
   }
 
   /**
@@ -1352,8 +1506,11 @@ export class VoiceAgent extends EventEmitter {
    * Detecta se há energia no áudio (não é silêncio)
    * Usa RMS (Root Mean Square) para calcular energia
    */
-  private detectAudioEnergy(pcmBuffer: Buffer, threshold: number = 500): boolean {
-    if (pcmBuffer.length < 4) return false;
+  /**
+   * Calcula o RMS (Root Mean Square) do buffer de áudio PCM 16-bit
+   */
+  private calculateRMS(pcmBuffer: Buffer): number {
+    if (pcmBuffer.length < 4) return 0;
     
     let sumSquares = 0;
     const samples = pcmBuffer.length / 2;
@@ -1363,8 +1520,11 @@ export class VoiceAgent extends EventEmitter {
       sumSquares += sample * sample;
     }
     
-    const rms = Math.sqrt(sumSquares / samples);
-    return rms > threshold;
+    return Math.sqrt(sumSquares / samples);
+  }
+
+  private detectAudioEnergy(pcmBuffer: Buffer, threshold: number = 500): boolean {
+    return this.calculateRMS(pcmBuffer) > threshold;
   }
 
   /**
@@ -1420,6 +1580,8 @@ export class VoiceAgent extends EventEmitter {
     const recording = this.callRecordings.get(callId);
     if (!recording) return;
     
+    const session = this.activeCalls.get(callId);
+    
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const dir = path.join(process.cwd(), 'recordings', `${timestamp}_twilio-${callId.substring(0, 8)}`);
     
@@ -1432,6 +1594,15 @@ export class VoiceAgent extends EventEmitter {
         path.join(dir, 'transcript.json'),
         JSON.stringify(recording.transcript, null, 2)
       );
+      
+      // 🆕 Salvar pensamentos internos do agente (se habilitado)
+      if (session?.internalThoughts && session.internalThoughts.length > 0) {
+        fs.writeFileSync(
+          path.join(dir, 'thoughts.json'),
+          JSON.stringify(session.internalThoughts, null, 2)
+        );
+        this.logger.info(`🧠 ${session.internalThoughts.length} pensamentos salvos`);
+      }
       
       // Salvar áudio do agente (concatenado)
       if (recording.agentAudio.length > 0) {
@@ -1756,15 +1927,32 @@ export class VoiceAgent extends EventEmitter {
       // Sintetizar e enviar áudio
       const ttsResult = await this.config.tts.synthesize(response.text);
       
-      // Resetar contadores para a saudação
+      // 🆕 Calcular duração do áudio (μ-law 8kHz = 8000 bytes/segundo)
+      const audioDurationMs = (ttsResult.audioBuffer.length / 8000) * 1000;
+      const now = Date.now();
+      
+      // 🆕 Resetar tracking antes de enviar (sendTwilioAudio vai calcular corretamente)
       this.totalAudioBytesSent.set(callId, 0);
-      this.audioPlaybackEndTime.set(callId, 0);
+      this.audioPlaybackStartTime.set(callId, now);
+      this.audioPlaybackEndTime.set(callId, 0); // sendTwilioAudio vai calcular
       this.isPlayingAudio.set(callId, true);
-      this.audioPlaybackStartTime.set(callId, Date.now());
+      
+      // 🆕 Marcar que é saudação (grace period maior para o "Alô" do usuário)
+      this.isGreetingPlaying.set(callId, true);
       
       await this.sendAudioToCall(callId, ttsResult.audioBuffer);
+      
+      // 🆕 Agendar reset de isPlayingAudio e isGreetingPlaying após o áudio terminar
+      setTimeout(() => {
+        // Só resetar se ainda for a mesma reprodução
+        const currentEndTime = this.audioPlaybackEndTime.get(callId);
+        if (currentEndTime && currentEndTime <= Date.now()) {
+          this.isPlayingAudio.set(callId, false);
+          this.isGreetingPlaying.set(callId, false);
+        }
+      }, audioDurationMs + 1000); // +1s margem extra
 
-      this.logger.info(`✅ Saudação enviada: "${response.text.substring(0, 50)}..."`);
+      this.logger.info(`✅ Saudação enviada: "${response.text.substring(0, 50)}..." (~${(audioDurationMs/1000).toFixed(1)}s)`);
     } catch (error) {
       this.logger.error(`Erro ao gerar saudação para ${callId}:`, error);
     }
@@ -1825,8 +2013,17 @@ export class VoiceAgent extends EventEmitter {
     this.pendingTranscription.delete(callId);
     this.ttsQueue.delete(callId);
     this.audioPlaybackEndTime.delete(callId);
+    this.isGreetingPlaying.delete(callId);
     this.totalAudioBytesSent.delete(callId);
     this.audioPlaybackStartTime.delete(callId);
+    this.pendingBargeInText.delete(callId); // 🆕
+    this.continuationDetected.delete(callId);
+    this.shouldCancelProcessing.delete(callId);
+    this.hasStartedPlayback.delete(callId);
+    this.lastAcknowledgmentTime.delete(callId);
+    this.audioAccumulationBuffer.delete(callId); // 🆕 Limpar buffer de acumulação
+    this.lastAudioSentTime.delete(callId);
+    this.greetingTranscription.delete(callId); // 🆕 Limpar transcrição durante saudação
     
     // Cancelar timer de debounce se existir
     const debounceTimer = this.transcriptionDebounceTimer.get(callId);

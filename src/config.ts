@@ -850,6 +850,18 @@ export const config = {
       // 500ms: equilibrado (RECOMENDADO com sistema de reprocessamento)
       // 700ms: conservador - menos cancelamentos, maior latência
       vadSilenceThresholdMs: parseInt(process.env.VAD_SILENCE_MS || '500'),
+      // VAD threshold: sensibilidade do detector de fala (0.1-0.9)
+      // Maior = menos sensível a ruído, menor = mais sensível
+      // 0.4-0.5: sensível (mais alucinações em ambientes ruidosos)
+      // 0.5-0.6: equilibrado (RECOMENDADO para telefonia com frases curtas)
+      // 0.7-0.9: agressivo (pode cortar fala baixa/curta)
+      vadThreshold: parseFloat(process.env.VAD_THRESHOLD || '0.5'),
+      // Min speech duration: duração mínima para considerar fala válida (50-2000ms)
+      // Filtra ruídos curtos (cliques, estalos) vs fala real
+      // 50-100ms: muito sensível (capta "Sim/Não" mas também ruídos)
+      // 100-150ms: sensível (RECOMENDADO para respostas curtas)
+      // 200-300ms: conservador (pode cortar "Sim/Não/Já")
+      minSpeechDurationMs: parseInt(process.env.MIN_SPEECH_DURATION_MS || '100'),
     },
   },
 

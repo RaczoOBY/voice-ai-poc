@@ -27,9 +27,14 @@ const SCRIBE_WS_URL = 'wss://api.elevenlabs.io/v1/speech-to-text/realtime';
 export interface ElevenLabsScribeConfig {
   apiKey: string;
   modelId?: string;           // 'scribe_v2_realtime'
-  sampleRate?: number;        // 16000 (padrão)
+  sampleRate?: number;        // 16000 (padrão) - ignorado se audioFormat for 'mulaw' ou 'alaw'
   language?: string;          // 'pt' para português
   vadSilenceThresholdMs?: number; // Tempo de silêncio para commit (500ms padrão)
+  // 🆕 Parâmetros para reduzir "alucinações" durante silêncio
+  vadThreshold?: number;      // Sensibilidade do VAD (0.1-0.9, padrão 0.4) - maior = menos sensível
+  minSpeechDurationMs?: number; // Duração mínima de fala (50-2000ms, padrão 250)
+  // 🆕 Formato de áudio - permite usar μ-law direto do Twilio sem conversão
+  audioFormat?: 'pcm' | 'ulaw_8000'; // 'pcm' (padrão), 'ulaw_8000' (Twilio direto - 8kHz μ-law)
 }
 
 // Eventos do WebSocket (snake_case conforme API real)
@@ -110,6 +115,10 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
       sampleRate: 16000,
       language: 'pt', // Português
       vadSilenceThresholdMs: 500, // Padrão 500ms (0.5s) - mesmo do test-scribe.ts
+      // 🆕 Parâmetros para captar frases curtas ("Sim", "Não", "Já")
+      vadThreshold: 0.5, // Equilibrado - sensível a fala curta mas filtra ruído
+      minSpeechDurationMs: 100, // 100ms - permite "Sim/Não/Já" (~100-200ms)
+      audioFormat: 'pcm', // Padrão PCM, mas pode usar 'ulaw_8000' para Twilio direto
       ...config,
     };
     this.logger = new Logger('ElevenLabs-Scribe');
@@ -150,12 +159,27 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
         return;
       }
       
+      // 🆕 Parâmetros de VAD para reduzir alucinações (valores padrão definidos no construtor)
+      const vadThreshold = this.config.vadThreshold!; // Padrão: 0.7
+      const minSpeechDurationMs = this.config.minSpeechDurationMs!; // Padrão: 200ms
+      
+      // 🆕 Determinar formato de áudio - ulaw_8000 para Twilio direto
+      const audioFormat = this.config.audioFormat || 'pcm';
+      let audioFormatParam: string;
+      if (audioFormat === 'ulaw_8000') {
+        audioFormatParam = 'ulaw_8000'; // μ-law 8kHz do Twilio direto
+      } else {
+        audioFormatParam = `pcm_${this.config.sampleRate}`; // PCM com sample rate
+      }
+      
       const params = new URLSearchParams({
         model_id: this.config.modelId,
         language_code: this.config.language,
         commit_strategy: 'vad',
         vad_silence_threshold_secs: vadSilenceThresholdSecsStr,
-        audio_format: `pcm_${this.config.sampleRate}`,
+        vad_threshold: vadThreshold.toString(), // 🆕 Sensibilidade do VAD (maior = menos sensível)
+        min_speech_duration_ms: minSpeechDurationMs.toString(), // 🆕 Duração mínima de fala
+        audio_format: audioFormatParam,
         include_timestamps: 'false',
       });
       
@@ -168,7 +192,9 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
       this.logger.debug(`  - language_code: ${this.config.language}`);
       this.logger.debug(`  - commit_strategy: vad`);
       this.logger.debug(`  - vad_silence_threshold_secs: ${vadSilenceThresholdSecsStr} (${vadSilenceThresholdMs}ms)`);
-      this.logger.debug(`  - audio_format: pcm_${this.config.sampleRate}`);
+      this.logger.debug(`  - vad_threshold: ${vadThreshold}`);
+      this.logger.debug(`  - min_speech_duration_ms: ${minSpeechDurationMs}`);
+      this.logger.debug(`  - audio_format: ${audioFormatParam}`);
       this.logger.debug(`  - include_timestamps: false`);
       
       this.ws = new WebSocket(wsUrl, {
@@ -512,13 +538,21 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
     // Atualizar timestamp para keepalive
     this.lastAudioSentTime = now;
 
-    // Enviar áudio no formato correto da API
-    const message = JSON.stringify({
+    // 🆕 Enviar áudio no formato correto da API
+    // Para ulaw_8000, não incluir sample_rate (o formato já define 8kHz)
+    const audioFormat = this.config.audioFormat || 'pcm';
+    const messageObj: Record<string, unknown> = {
       message_type: 'input_audio_chunk',
       audio_base_64: chunk.toString('base64'),
-      sample_rate: this.config.sampleRate,
       commit: false,
-    });
+    };
+    
+    // Só incluir sample_rate para PCM
+    if (audioFormat === 'pcm') {
+      messageObj.sample_rate = this.config.sampleRate;
+    }
+    
+    const message = JSON.stringify(messageObj);
 
     try {
       this.ws.send(message);
