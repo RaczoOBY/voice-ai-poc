@@ -107,6 +107,26 @@ export interface TelnyxCallEvent {
   };
 }
 
+// Twilio
+export interface TwilioConfig {
+  accountSid: string;
+  authToken: string;
+  phoneNumber: string;
+  webhookUrl: string;
+}
+
+export interface TwilioCallEvent {
+  type: 'initiated' | 'ringing' | 'answered' | 'completed' | 'busy' | 'no-answer' | 'canceled' | 'failed';
+  payload: {
+    callSid: string;
+    accountSid: string;
+    from: string;
+    to: string;
+    callStatus: string;
+    direction: 'outbound-api' | 'inbound';
+  };
+}
+
 // OpenAI
 export interface OpenAIConfig {
   apiKey: string;
@@ -239,12 +259,15 @@ export interface CallSummary {
 // PROVIDER INTERFACES
 // ============================================
 
+// Union type para eventos de chamada (suporta múltiplos providers)
+export type TelephonyCallEvent = TelnyxCallEvent | TwilioCallEvent;
+
 export interface ITelephonyProvider {
   makeCall(phoneNumber: string): Promise<string>;
   endCall(callId: string): Promise<void>;
   sendAudio(callId: string, audioBuffer: Buffer): Promise<void>;
   onAudioReceived(callId: string, callback: (audio: Buffer) => void): void;
-  onCallEvent(callback: (event: TelnyxCallEvent) => void): void;
+  onCallEvent(callback: (event: TelephonyCallEvent) => void): void;
 }
 
 export interface ITranscriber {

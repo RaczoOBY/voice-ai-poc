@@ -13,7 +13,9 @@
  */
 
 import dotenv from 'dotenv';
-dotenv.config();
+// IMPORTANTE: override: false garante que variáveis de ambiente da linha de comando
+// (como MODE=local) não sejam sobrescritas pelo .env
+dotenv.config({ override: false });
 
 import { ChatCompletionCreateParamsBase } from 'openai/resources/chat/completions';
 
@@ -21,7 +23,7 @@ import { ChatCompletionCreateParamsBase } from 'openai/resources/chat/completion
 // TIPOS
 // ============================================================================
 
-export type ExecutionMode = 'local' | 'telnyx';
+export type ExecutionMode = 'local' | 'telnyx' | 'twilio';
 
 interface ConversationPhase {
   id: string;
@@ -800,6 +802,13 @@ export const config = {
     webhookUrl: process.env.WEBHOOK_URL || '',
   },
 
+  twilio: {
+    accountSid: process.env.TWILIO_ACCOUNT_SID || '',
+    authToken: process.env.TWILIO_AUTH_TOKEN || '',
+    phoneNumber: process.env.TWILIO_PHONE_NUMBER || '',
+    webhookUrl: process.env.WEBHOOK_URL || '',
+  },
+
   // ============================================================================
   // CONFIGURAÇÃO DE LLM - Benchmarks (Cloud(x) 2025)
   // ============================================================================
@@ -853,7 +862,9 @@ export const config = {
     similarityBoost: 0.75,  // Voz mais consistente
     style: 0.30,            // Menos "dramático", mais conversacional e profissional
     speed: 0.85,            // Cadenciado mas evita buffer underflow (era 0.82)
-    outputFormat: 'pcm_16000',
+    // Formato de saída: ulaw_8000 para Twilio (μ-law 8kHz), pcm_22050 para local
+    // IMPORTANTE: pcm_22050 é necessário pois LocalAudioProvider usa 22050Hz para playback
+    outputFormat: (process.env.MODE || 'local') === 'twilio' ? 'ulaw_8000' : 'pcm_22050',
   },
 
   server: {
@@ -1121,10 +1132,13 @@ Sempre retorne JSON válido com os campos especificados. Seja específico e acio
 export function validateConfig(): void {
   const alwaysRequired = ['OPENAI_API_KEY', 'ELEVENLABS_API_KEY'];
   const telnyxRequired = ['TELNYX_API_KEY', 'TELNYX_CONNECTION_ID'];
+  const twilioRequired = ['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN'];
 
   let required = [...alwaysRequired];
   if (config.mode === 'telnyx') {
     required = [...required, ...telnyxRequired];
+  } else if (config.mode === 'twilio') {
+    required = [...required, ...twilioRequired];
   }
 
   const missing = required.filter((key) => !process.env[key]);

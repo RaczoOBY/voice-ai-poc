@@ -459,13 +459,17 @@ export class ElevenLabsScribe extends EventEmitter implements ITranscriber {
    * Isso evita métricas incorretas quando o usuário fala durante reprodução do agente.
    */
   feedAudio(callId: string, chunk: Buffer): void {
-    if (!this.isConnected || !this.ws) {
-      this.logger.warn('WebSocket não conectado, tentando reconectar...');
-      // Tentar reconectar em background
-      this.attemptReconnect(callId).catch(err => {
-        this.logger.error('Falha ao reconectar durante feedAudio:', err);
-      });
-      return;
+    // Verificar se WebSocket está realmente aberto (readyState === 1 = OPEN)
+    if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      // Só logar se não estiver conectando (evitar spam de logs)
+      if (this.ws?.readyState !== WebSocket.CONNECTING) {
+        this.logger.warn('WebSocket não conectado, tentando reconectar...');
+        // Tentar reconectar em background
+        this.attemptReconnect(callId).catch(err => {
+          this.logger.error('Falha ao reconectar durante feedAudio:', err);
+        });
+      }
+      return; // Descartar áudio enquanto não conectado
     }
 
     const now = Date.now();

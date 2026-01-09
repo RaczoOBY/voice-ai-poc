@@ -974,6 +974,9 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
    * Para a reprodução imediatamente (barge-in)
    */
   stopPlayback(): void {
+    // IMPORTANTE: Limpar buffer de streaming PRIMEIRO para evitar que novos chunks sejam reproduzidos
+    this.clearStreamState();
+    
     if (this.currentSpeaker) {
       try {
         this.currentSpeaker.close(false); // Fecha sem flush

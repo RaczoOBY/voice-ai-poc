@@ -26,6 +26,32 @@ export class ElevenLabsTTS implements ITTS {
     this.client = new ElevenLabsClient({
       apiKey: config.apiKey,
     });
+    this.logger.info(`📢 Formato de saída: ${config.outputFormat || 'pcm_22050'}`);
+  }
+
+  /**
+   * Retorna bytes por segundo baseado no formato de áudio
+   */
+  private getBytesPerSecond(format: string): number {
+    switch (format) {
+      case 'ulaw_8000':
+        return 8000;  // μ-law 8kHz = 8000 bytes/s
+      case 'pcm_8000':
+        return 16000; // PCM 8kHz 16-bit = 16000 bytes/s
+      case 'pcm_16000':
+        return 32000; // PCM 16kHz 16-bit = 32000 bytes/s
+      case 'pcm_22050':
+        return 44100; // PCM 22050Hz 16-bit = 44100 bytes/s
+      case 'pcm_24000':
+        return 48000; // PCM 24kHz 16-bit = 48000 bytes/s
+      case 'pcm_44100':
+        return 88200; // PCM 44.1kHz 16-bit = 88200 bytes/s
+      case 'mp3_44100_128':
+      case 'mp3_44100_192':
+        return 16000; // Estimativa para MP3
+      default:
+        return 44100; // Default PCM 22050Hz
+    }
   }
 
   /**
@@ -37,12 +63,14 @@ export class ElevenLabsTTS implements ITTS {
     this.logger.debug(`🔊 Sintetizando: "${text.substring(0, 50)}..."`);
 
     try {
+      const outputFormat = this.config.outputFormat || 'pcm_22050';
+      
       const stream = await this.client.textToSpeech.convert(
         this.config.voiceId,
         {
           text,
           modelId: this.config.model,
-          outputFormat: 'pcm_22050',
+          outputFormat: outputFormat as any,
           voiceSettings: {
             stability: this.config.stability,
             similarityBoost: this.config.similarityBoost,
@@ -67,8 +95,9 @@ export class ElevenLabsTTS implements ITTS {
       const audioBuffer = Buffer.concat(chunks.map(chunk => Buffer.from(chunk)));
       const duration = Date.now() - startTime;
 
-      // PCM 22050Hz mono 16-bit = 44100 bytes/segundo
-      const audioDuration = audioBuffer.length / 44100;
+      // Calcular duração baseado no formato
+      const bytesPerSecond = this.getBytesPerSecond(outputFormat);
+      const audioDuration = audioBuffer.length / bytesPerSecond;
 
       const result: TTSResult = {
         audioBuffer,
@@ -95,12 +124,14 @@ export class ElevenLabsTTS implements ITTS {
     this.logger.debug(`🎵 Sintetizando filler: "${text}"`);
 
     try {
+      const outputFormat = this.config.outputFormat || 'pcm_22050';
+      
       const stream = await this.client.textToSpeech.convert(
         this.config.voiceId,
         {
           text,
           modelId: this.config.model,
-          outputFormat: 'pcm_22050',
+          outputFormat: outputFormat as any,
           voiceSettings: {
             // Configurações otimizadas para fillers naturais e curtos
             stability: 0.2,           // Muito baixo = mais natural e variado
@@ -125,8 +156,9 @@ export class ElevenLabsTTS implements ITTS {
       const audioBuffer = Buffer.concat(chunks.map(chunk => Buffer.from(chunk)));
       const duration = Date.now() - startTime;
 
-      // PCM 22050Hz mono 16-bit = 44100 bytes/segundo
-      const audioDuration = audioBuffer.length / 44100;
+      // Calcular duração baseado no formato
+      const bytesPerSecond = this.getBytesPerSecond(outputFormat);
+      const audioDuration = audioBuffer.length / bytesPerSecond;
 
       const result: TTSResult = {
         audioBuffer,
@@ -144,19 +176,21 @@ export class ElevenLabsTTS implements ITTS {
 
   /**
    * Sintetiza com streaming usando o cliente oficial do ElevenLabs
-   * Retorna PCM 16-bit 22050Hz mono para compatibilidade com speaker
+   * Formato de saída configurável via config.outputFormat
    */
   async synthesizeStream(text: string, onChunk: (chunk: Buffer) => void): Promise<void> {
     const startTime = Date.now();
     this.logger.debug(`🔊 Sintetizando com stream: "${text.substring(0, 50)}..."`);
 
     try {
+      const outputFormat = this.config.outputFormat || 'pcm_22050';
+      
       const stream = await this.client.textToSpeech.stream(
         this.config.voiceId,
         {
           text,
           modelId: this.config.model,
-          outputFormat: 'pcm_22050',
+          outputFormat: outputFormat as any,
           voiceSettings: {
             stability: this.config.stability,
             similarityBoost: this.config.similarityBoost,

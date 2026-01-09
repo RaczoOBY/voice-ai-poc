@@ -104,7 +104,8 @@ export class OpenAILLM implements ILLM {
       }
 
       const duration = Date.now() - startTime;
-      this.logger.info(`✅ LLM Stream (${duration}ms): "${fullText.substring(0, 50)}..."`);
+      this.logger.info(`✅ LLM Stream (${duration}ms, ${fullText.length} chars):`);
+      this.logger.info(`   📝 Resposta: "${fullText}"`);
 
       return {
         text: fullText,

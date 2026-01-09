@@ -2,6 +2,7 @@
  * Provider exports
  */
 export { TelnyxProvider } from './TelnyxProvider';
+export { TwilioProvider } from './TwilioProvider';
 export { LocalAudioProvider } from './LocalAudioProvider';
 export { OpenAITranscriber, OpenAIRealtimeTranscriber } from './OpenAITranscriber';
 export { OpenAILLM, OpenAIRealtimeLLM } from './OpenAILLM';
