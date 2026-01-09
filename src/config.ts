@@ -923,9 +923,16 @@ Gere APENAS a frase:`,
   // Acknowledgments: onomatopeias de escuta ativa ("Uhum", "Hm", "Certo")
   // Tocadas quando usuário continua falando após uma pausa
   // Dá feedback de que o agente está ouvindo
+  // Priorizamos onomatopeias curtas e naturais em português BR
   acknowledgments: {
     enabled: process.env.ACKNOWLEDGMENTS_ENABLED !== 'false', // Habilitado por padrão
-    phrases: ['Uhum', 'Hm', 'Certo', 'Tá'],
+    phrases: [
+      'Uhum',    // Natural e comum - pode aparecer mais vezes
+      'Uhum',    // Duplicado para aumentar probabilidade
+      'Hm hm',   // Variação do Hm
+      'Hm',      // Curto e natural
+      'Sei',     // Brasileiro e natural
+    ],
     cooldownMs: 3000, // Mínimo 3s entre acknowledgments (evita repetição)
   },
 

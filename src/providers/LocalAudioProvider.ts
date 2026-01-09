@@ -345,7 +345,15 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
           this.consecutiveSpeechFrames = 0;
           this.bargeInTriggered = false;
         }
-        return; // Não enviar para Scribe enquanto está reproduzindo (buffer será enviado depois)
+        
+        // 🆕 SEMPRE enviar para Scribe durante playback para permitir barge-in via transcrição parcial
+        // Isso permite que o StreamingVoiceAgent detecte barge-in mesmo quando a energia não é suficiente
+        // (ex: usuário está falando baixo mas claramente)
+        const chunkCallback = this.audioChunkCallbacks.get(callId);
+        if (chunkCallback && !isDefinitelyEcho) {
+          chunkCallback(chunk);
+        }
+        return;
       }
       
       // Se acabou de parar de reproduzir, esperar cooldown antes de enviar para Scribe
