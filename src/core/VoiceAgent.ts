@@ -63,6 +63,13 @@ export class VoiceAgent extends EventEmitter {
   private transcriptionDebounceTimer: Map<string, NodeJS.Timeout> = new Map();
   private static readonly TRANSCRIPTION_DEBOUNCE_MS = 800; // Espera 800ms após última transcrição antes de processar
   
+  // 🆕 Detecção de continuação (paridade com StreamingVoiceAgent)
+  private continuationDetected: Map<string, boolean> = new Map();
+  private shouldCancelProcessing: Map<string, boolean> = new Map();
+  private hasStartedPlayback: Map<string, boolean> = new Map();
+  private lastAcknowledgmentTime: Map<string, number> = new Map();
+  private static readonly ACKNOWLEDGMENT_COOLDOWN_MS = 3000; // Cooldown entre acknowledgments
+  
   // Rastreamento de duração da reprodução (para detectar barge-in durante playback no Twilio)
   private audioPlaybackEndTime: Map<string, number> = new Map();
   private totalAudioBytesSent: Map<string, number> = new Map();
@@ -369,7 +376,32 @@ export class VoiceAgent extends EventEmitter {
                       this.logger.error(`❌ Falha ao iniciar STT streaming:`, error);
                     }
                     
-                    // Configurar callback para transcrições
+                    // 🆕 Configurar callback para transcrições PARCIAIS (detecção de continuação)
+                    if (this.config.transcriber.onPartialTranscript) {
+                      this.config.transcriber.onPartialTranscript(callSid, (text) => {
+                        const trimmedText = text.trim();
+                        if (trimmedText.length < 5) return; // Ignorar transcrições muito curtas
+                        
+                        // Detectar continuação: usuário continua falando durante processamento
+                        if (this.isProcessing.get(callSid) && !this.hasStartedPlayback.get(callSid)) {
+                          // CASO 1: Processando mas áudio ainda não começou - cancelar e aguardar
+                          if (!this.shouldCancelProcessing.get(callSid)) {
+                            this.logger.info(`🔄 Usuário continuou falando: "${trimmedText.substring(0, 30)}..." - cancelando processamento`);
+                            this.shouldCancelProcessing.set(callSid, true);
+                            this.continuationDetected.set(callSid, true);
+                            
+                            // 🎵 Tocar acknowledgment ("Uhum")
+                            this.playAcknowledgment(callSid);
+                          }
+                        } else if (this.isProcessing.get(callSid) && this.hasStartedPlayback.get(callSid)) {
+                          // CASO 2: Áudio já começou - barge-in
+                          this.logger.info(`👂 Transcrição parcial durante playback: "${trimmedText.substring(0, 40)}..."`);
+                          // Barge-in será detectado via energia de áudio
+                        }
+                      });
+                    }
+                    
+                    // Configurar callback para transcrições FINAIS (committed)
                     this.config.transcriber.onTranscript(callSid, async (result) => {
                       const text = result.text.trim();
                       if (text) {
@@ -773,14 +805,34 @@ export class VoiceAgent extends EventEmitter {
       this.bargeInDetected.set(callId, false);
     }
 
-    // Agregar texto com transcrição pendente
-    const pendingText = this.pendingTranscription.get(callId) || '';
-    const aggregatedText = pendingText ? `${pendingText} ${userText}` : userText;
-    this.pendingTranscription.set(callId, aggregatedText);
+    // 🆕 Se detectamos continuação via parciais, esta é a transcrição completa - combinar
+    if (this.continuationDetected.get(callId)) {
+      const pendingText = this.pendingTranscription.get(callId) || '';
+      const combinedText = pendingText ? `${pendingText} ${userText}` : userText;
+      this.logger.info(`🔗 Transcrições combinadas (continuação): "${combinedText.substring(0, 50)}..."`);
+      this.pendingTranscription.set(callId, combinedText);
+      this.continuationDetected.set(callId, false);
+      this.shouldCancelProcessing.set(callId, false);
+      // Continua para processar com debounce
+    } else {
+      // Agregar texto com transcrição pendente (comportamento normal)
+      const pendingText = this.pendingTranscription.get(callId) || '';
+      const aggregatedText = pendingText ? `${pendingText} ${userText}` : userText;
+      this.pendingTranscription.set(callId, aggregatedText);
+    }
 
-    // Se já está processando, apenas agregar e esperar
+    // Se já está processando, verificar se deve cancelar ou apenas agregar
     if (this.isProcessing.get(callId)) {
-      this.logger.debug(`📝 Texto agregado (processando): "${userText}" → "${aggregatedText.substring(0, 50)}..."`);
+      if (!this.hasStartedPlayback.get(callId)) {
+        // Áudio ainda não começou - marcar para cancelar e tocar acknowledgment
+        if (!this.shouldCancelProcessing.get(callId)) {
+          this.logger.info(`🔄 Nova transcrição durante processamento - cancelando`);
+          this.shouldCancelProcessing.set(callId, true);
+          this.continuationDetected.set(callId, true);
+          this.playAcknowledgment(callId);
+        }
+      }
+      this.logger.debug(`📝 Texto agregado (processando): "${userText}" → "${this.pendingTranscription.get(callId)?.substring(0, 50)}..."`);
       return;
     }
 
@@ -859,6 +911,10 @@ export class VoiceAgent extends EventEmitter {
       const filler = this.config.fillerManager.getFiller(fillerContext);
       let fillerSent = false;
 
+      // 🆕 Resetar flags de controle no início do processamento
+      this.hasStartedPlayback.set(callId, false);
+      this.shouldCancelProcessing.set(callId, false);
+
       if (filler) {
         timestamps.fillerStart = Date.now();
         this.isPlayingAudio.set(callId, true);
@@ -872,6 +928,13 @@ export class VoiceAgent extends EventEmitter {
         
         // Gravar filler como áudio do agente
         this.recordAgentAudio(callId, filler.audioBuffer);
+      }
+
+      // 🆕 Verificar se deve cancelar ANTES do LLM
+      if (this.shouldCancelProcessing.get(callId)) {
+        this.logger.info(`🛑 Processamento cancelado antes do LLM (usuário continuou falando)`);
+        this.isProcessing.set(callId, false);
+        return;
       }
 
       // ============================================
@@ -910,9 +973,18 @@ export class VoiceAgent extends EventEmitter {
         fullResponse = llmResult.text;
         timestamps.llmEnd = Date.now();
         
+        // 🆕 Verificar cancelamento antes do TTS (modo batch)
+        if (this.shouldCancelProcessing.get(callId)) {
+          this.logger.info(`🛑 Processamento cancelado antes do TTS (usuário continuou falando)`);
+          this.isProcessing.set(callId, false);
+          return;
+        }
+        
         const ttsResult = await this.config.tts.synthesize(fullResponse);
         timestamps.ttsStart = Date.now();
         timestamps.ttsFirstByte = Date.now();
+        // 🆕 Marcar que o playback começou
+        this.hasStartedPlayback.set(callId, true);
         await this.sendAudioToCall(callId, ttsResult.audioBuffer);
         timestamps.ttsEnd = Date.now();
         totalTTSBytes = ttsResult.audioBuffer.length;
@@ -922,8 +994,8 @@ export class VoiceAgent extends EventEmitter {
       } else {
         // Processar LLM com streaming
         await this.config.llm.generateStream!(messages, async (chunk: string) => {
-        // Verificar barge-in
-        if (this.bargeInDetected.get(callId)) {
+        // 🆕 Verificar barge-in OU cancelamento por continuação
+        if (this.bargeInDetected.get(callId) || this.shouldCancelProcessing.get(callId)) {
           interrupted = true;
           return;
         }
@@ -957,8 +1029,8 @@ export class VoiceAgent extends EventEmitter {
             
             // Usar fila de TTS para serializar
             this.enqueueTTS(callId, textToSpeak, (audioChunk: Buffer) => {
-              // Verificar barge-in antes de enviar áudio
-              if (this.bargeInDetected.get(callId)) {
+              // Verificar barge-in ou cancelamento antes de enviar áudio
+              if (this.bargeInDetected.get(callId) || this.shouldCancelProcessing.get(callId)) {
                 interrupted = true;
                 return;
               }
@@ -966,6 +1038,8 @@ export class VoiceAgent extends EventEmitter {
               if (!firstAudioSent) {
                 timestamps.ttsFirstByte = Date.now();
                 firstAudioSent = true;
+                // 🆕 Marcar que o playback começou
+                this.hasStartedPlayback.set(callId, true);
                 this.config.metrics.recordEvent({
                   stage: 'tts_first_byte',
                   timestamp: timestamps.ttsFirstByte,
@@ -990,7 +1064,7 @@ export class VoiceAgent extends EventEmitter {
         // Flush do buffer restante (também enfileirado)
         if (textBuffer.trim().length > 0 && !interrupted) {
           this.enqueueTTS(callId, textBuffer.trim(), (audioChunk: Buffer) => {
-            if (this.bargeInDetected.get(callId)) {
+            if (this.bargeInDetected.get(callId) || this.shouldCancelProcessing.get(callId)) {
               interrupted = true;
               return;
             }
@@ -998,6 +1072,8 @@ export class VoiceAgent extends EventEmitter {
             if (!firstAudioSent) {
               timestamps.ttsFirstByte = Date.now();
               firstAudioSent = true;
+              // 🆕 Marcar que o playback começou
+              this.hasStartedPlayback.set(callId, true);
             }
             
             totalTTSBytes += audioChunk.length;
@@ -1108,8 +1184,11 @@ export class VoiceAgent extends EventEmitter {
       this.logger.error(`Erro no turno ${turnId}:`, error);
       this.emit('error', error as Error, `turn:${turnId}`);
     } finally {
-      // Sempre liberar flag de processamento
+      // Sempre liberar flags de processamento e continuação
       this.isProcessing.set(callId, false);
+      this.hasStartedPlayback.set(callId, false);
+      // 🆕 NÃO resetar shouldCancelProcessing e continuationDetected aqui
+      // pois elas serão usadas na próxima transcrição
       
       // Verificar se há transcrições pendentes para processar
       const pendingText = this.pendingTranscription.get(callId);
@@ -1688,6 +1767,39 @@ export class VoiceAgent extends EventEmitter {
       this.logger.info(`✅ Saudação enviada: "${response.text.substring(0, 50)}..."`);
     } catch (error) {
       this.logger.error(`Erro ao gerar saudação para ${callId}:`, error);
+    }
+  }
+
+  /**
+   * 🆕 Toca um acknowledgment curto ("Uhum", "Hm") para indicar que está ouvindo
+   * Paridade com StreamingVoiceAgent
+   */
+  private async playAcknowledgment(callId: string): Promise<void> {
+    // Verificar cooldown
+    const lastTime = this.lastAcknowledgmentTime.get(callId) || 0;
+    const now = Date.now();
+    if (now - lastTime < VoiceAgent.ACKNOWLEDGMENT_COOLDOWN_MS) {
+      this.logger.debug(`🎵 Acknowledgment em cooldown (${VoiceAgent.ACKNOWLEDGMENT_COOLDOWN_MS - (now - lastTime)}ms restantes)`);
+      return;
+    }
+
+    this.lastAcknowledgmentTime.set(callId, now);
+
+    try {
+      const acknowledgments = ['Uhum', 'Hm', 'Tá'];
+      const randomAck = acknowledgments[Math.floor(Math.random() * acknowledgments.length)];
+      
+      this.logger.info(`🎵 Tocando acknowledgment: "${randomAck}"`);
+      
+      // Sintetizar áudio curto do acknowledgment
+      const ttsResult = await this.config.tts.synthesize(randomAck);
+      
+      // Enviar áudio sem marcar como reprodução principal
+      await this.sendAudioToCall(callId, ttsResult.audioBuffer);
+      
+      this.logger.debug(`✅ Acknowledgment enviado`);
+    } catch (error) {
+      this.logger.debug(`Erro ao tocar acknowledgment (não crítico):`, error);
     }
   }
 
