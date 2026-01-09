@@ -313,10 +313,9 @@ export class LocalAudioProvider extends EventEmitter implements ITelephonyProvid
                                  echoAnalysis.correlation > 0.5 && 
                                  echoAnalysis.confidence > 0.7;
         
-        // 🔍 DIAGNÓSTICO: Log INFO para ver energia durante playback
-        // Loga QUALQUER energia acima de 0.005 (muito baixo) para diagnosticar
-        if (energy > 0.005) {
-          this.logger.info(`🎤 PLAYBACK energia=${energy.toFixed(4)} | threshold=${bargeInThreshold.toFixed(4)} | eco=${echoAnalysis.isEcho ? `SIM(${echoAnalysis.correlation.toFixed(2)})` : 'NÃO'} | frames=${this.consecutiveSpeechFrames}`);
+        // Log de debug para monitorar níveis de energia durante playback
+        if (energy > VAD_CONFIG.ENERGY_THRESHOLD * 0.5) {
+          this.logger.debug(`🎤 Durante playback: energia=${energy.toFixed(4)}, threshold=${bargeInThreshold.toFixed(4)}, frames=${this.consecutiveSpeechFrames}, corr=${echoAnalysis.correlation.toFixed(3)}, eco=${isDefinitelyEcho ? 'SIM' : 'NÃO'}`);
         }
         
         // Considera barge-in se:
