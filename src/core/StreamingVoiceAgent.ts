@@ -1530,6 +1530,14 @@ export class StreamingVoiceAgent extends EventEmitter {
     
     // Salvar transcrição da chamada
     if (this.callRecorder) {
+      // Transferir pensamentos da sessão para o CallRecorder
+      if (session.internalThoughts && session.internalThoughts.length > 0) {
+        for (const thought of session.internalThoughts) {
+          this.callRecorder.addThoughts(thought);
+        }
+        this.logger.info(`🧠 ${session.internalThoughts.length} pensamentos transferidos para gravação`);
+      }
+      
       const recordingMetrics = {
         averageSTT: session.metrics.averageLatency.stt,
         averageLLM: session.metrics.averageLatency.llm,
